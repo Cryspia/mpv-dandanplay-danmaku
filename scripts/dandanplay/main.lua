@@ -164,6 +164,9 @@ local state = {
     cursor_last = 0,               -- mp.get_time() of last mouse activity
     overlay_obj = nil,             -- mp osd-overlay object
     file_id = 0,                   -- bumped on each file-loaded; cancels stale searches
+    parsed_series = nil,           -- helper's SERIES: line from last match attempt
+    parsed_season = nil,
+    parsed_episode = nil,
 }
 
 -- Coordinates for the icon (top-right corner, slightly inset). Click area
@@ -537,7 +540,26 @@ local function trigger_match()
         local stderr = (result and result.stderr or "")
         for line in stderr:gmatch("[^\n]+") do msg.info(line) end
 
-        local epid = stdout:match("^EPID:(%d+)$")
+        -- Helper output is multi-line key:value:
+        --   EPID:<id> | NONE       (first line, success / failure)
+        --   SERIES:<title>          (always when known)
+        --   SEASON:<n>              (when known)
+        --   EPISODE:<n>             (when known)
+        -- Capture all of them so we can record an alias on manual pick.
+        local epid, parsed_series, parsed_season, parsed_episode
+        for line in stdout:gmatch("[^\n]+") do
+            local v = line:match("^EPID:(%d+)$")
+            if v then epid = v end
+            v = line:match("^SERIES:(.+)$")
+            if v then parsed_series = v end
+            v = line:match("^SEASON:(%d+)$")
+            if v then parsed_season = tonumber(v) end
+            v = line:match("^EPISODE:(%d+)$")
+            if v then parsed_episode = tonumber(v) end
+        end
+        state.parsed_series = parsed_series
+        state.parsed_season = parsed_season
+        state.parsed_episode = parsed_episode
         if not epid then
             -- Append diagnostic info to a known log file so the user can
             -- paste it back when "no match" is unexpected. mpv's own log
@@ -1310,6 +1332,30 @@ show_episode_picker = function(anime)
             local epid = item.episodeId
             modal_close()
             state.last_status = "loading"; update_icon_overlay()
+
+            -- Smart-match: if the user is manually picking because
+            -- auto-match parsed a series name that dandanplay doesn't
+            -- recognize, remember that {parsed-series → picked-anime}
+            -- mapping. Future episodes of the same series that fail
+            -- their primary search will fall back to this alias.
+            if state.parsed_series and anime.animeTitle
+               and state.parsed_series ~= "" and anime.animeTitle ~= ""
+               and state.parsed_series ~= anime.animeTitle then
+                helper_run_async(
+                    {"record-alias", state.parsed_series, anime.animeTitle},
+                    function(_s, r, _e)
+                        local out = (r and r.stdout or ""):gsub("\n$", "")
+                        if out == "OK" then
+                            msg.info(string.format(
+                                "alias recorded: %q → %q",
+                                state.parsed_series, anime.animeTitle))
+                            mp.osd_message(string.format(
+                                "已记忆：%s → %s",
+                                state.parsed_series, anime.animeTitle), 2.5)
+                        end
+                    end)
+            end
+
             local out_path = path_join(TMP_DIR, string.format("dmk-%d.ass", epid))
             helper_run_async({"fetch", tostring(epid), out_path,
                               "--offset", string.format("%.3f", offset_get(epid))},

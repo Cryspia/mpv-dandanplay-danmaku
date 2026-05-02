@@ -218,6 +218,61 @@ def cache_put(key: str, episode_id: int) -> None:
 
 
 # ============================================================================
+# Series-level alias map.
+#
+# When auto-match parses a video title to "Series A" but dandanplay knows it
+# as "番剧A", the user manually searches and picks "番剧A". We remember that
+# mapping so the NEXT episode of "Series A" — even though auto-match still
+# parses to the same wrong name — falls back to "番剧A" without manual
+# intervention.
+#
+#   {"Series A": "番剧A",
+#    "尖帽子的魔法工坊": "尖帽子的魔法工房"}
+#
+# Aliases are deliberately series-level (no season/episode). dandanplay
+# itself stores different seasons as separate anime entries, so the user
+# normally picks per-season anyway and the alias gets overwritten with the
+# correct season's title on the next pick if needed.
+# ============================================================================
+def _alias_path() -> pathlib.Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR / "aliases.json"
+
+
+def alias_get(series: str) -> str | None:
+    """Return the cached alias for a series name, or None."""
+    p = _alias_path()
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text())
+        v = data.get(series)
+        return v if isinstance(v, str) and v else None
+    except Exception:
+        return None
+
+
+def alias_put(series: str, alias: str) -> None:
+    """Record that `series` should fall back to searching `alias`. A
+    no-op if the names are identical or empty."""
+    series = (series or "").strip()
+    alias = (alias or "").strip()
+    if not series or not alias or series == alias:
+        return
+    p = _alias_path()
+    data: dict[str, str] = {}
+    if p.is_file():
+        try:
+            d = json.loads(p.read_text())
+            if isinstance(d, dict):
+                data = {k: v for k, v in d.items() if isinstance(v, str)}
+        except Exception:
+            data = {}
+    data[series] = alias
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+# ============================================================================
 # dandanplay API client — through a CORS-proxy CF Worker (default), or
 # direct with HMAC-SHA256 signature if AppId+AppSecret configured.
 # ============================================================================
@@ -365,24 +420,42 @@ def parse_filename(name: str) -> tuple[str, int | None, int | None]:
 # ============================================================================
 # Match resolution — given metadata, find a dandanplay episodeId
 # ============================================================================
+def _search_with_season(title: str, season: int | None,
+                        episode: int | None) -> list[dict]:
+    """Run a single ddp search, appending the season number to non-S1 titles."""
+    query = title.strip()
+    if season and season > 1:
+        query = f"{query} {season}"
+    log(f"searching: anime={query!r} episode={episode}")
+    return ddp_search_episodes(query, episode)
+
+
 def resolve_match(title: str, season: int | None, episode: int | None,
                   cache_key: str | None = None) -> int | None:
-    """Search dandanplay and pick the best episode match. Caches result."""
+    """Search dandanplay and pick the best episode match. Caches result.
+
+    Smart-match: if the primary search returns no animes AND we have a
+    series-level alias on file (recorded by the user via manual search),
+    retry the search using the aliased name. This lets future episodes
+    of the same series auto-match without manual intervention even when
+    the file's title doesn't match dandanplay's anime title."""
     if cache_key:
         hit = cache_get(cache_key)
         if hit:
             log(f"cache hit: {cache_key} → {hit}")
             return hit
 
-    # Mirror upstream behaviour: append season number to title if season > 1
-    query = title.strip()
-    if season and season > 1:
-        query = f"{query} {season}"
-    log(f"searching: anime={query!r} episode={episode}")
-    animes = ddp_search_episodes(query, episode)
+    animes = _search_with_season(title, season, episode)
     if not animes:
-        log("no matches")
-        return None
+        # Fallback: did the user previously map this series to a
+        # different dandanplay anime title via manual search?
+        alias = alias_get(title)
+        if alias and alias.strip() != title.strip():
+            log(f"no match for {title!r}; trying alias {alias!r}")
+            animes = _search_with_season(alias, season, episode)
+        if not animes:
+            log("no matches")
+            return None
 
     # Take the first anime, then within it pick the episode whose number
     # matches our episode (look at episodeTitle prefix or position).
@@ -893,10 +966,26 @@ def load_xml_comments(path: str) -> list[Comment]:
 # ============================================================================
 # CLI commands
 # ============================================================================
-def cmd_match_jellyfin(args) -> int:
-    cache_key = f"jf::{args.title}::{args.season}::{args.episode}"
-    eid = resolve_match(args.title, args.season, args.episode, cache_key)
+def _emit_match(eid: int | None, series: str,
+                season: int | None, episode: int | None) -> None:
+    """Print the match result as a multi-line key:value record on stdout.
+    Lua reads each line and captures the parsed series for alias recording.
+    First line is always EPID:<id> on success or NONE on failure (kept for
+    backwards compat with old Lua callers that match against the first line)."""
     print(f"EPID:{eid}" if eid else "NONE")
+    if series:
+        print(f"SERIES:{series}")
+    if season is not None:
+        print(f"SEASON:{season}")
+    if episode is not None:
+        print(f"EPISODE:{episode}")
+
+
+def cmd_match_jellyfin(args) -> int:
+    series = (args.title or "").strip()
+    cache_key = f"jf::{series}::{args.season}::{args.episode}"
+    eid = resolve_match(series, args.season, args.episode, cache_key)
+    _emit_match(eid, series, args.season, args.episode)
     return 0 if eid else 1
 
 
@@ -904,12 +993,43 @@ def cmd_match_file(args) -> int:
     title, season, episode = parse_filename(args.path)
     if not title:
         log("could not parse filename")
-        print("NONE"); return 1
+        _emit_match(None, "", None, None)
+        return 1
     log(f"parsed: title={title!r} season={season} episode={episode}")
     cache_key = f"file::{os.path.basename(args.path)}"
     eid = resolve_match(title, season, episode, cache_key)
-    print(f"EPID:{eid}" if eid else "NONE")
+    _emit_match(eid, title, season, episode)
     return 0 if eid else 1
+
+
+def cmd_record_alias(args) -> int:
+    """Persist a series → dandanplay-anime-title alias. Called by Lua after
+    the user manually picks an anime via the search panel for a series
+    whose auto-match was wrong or empty."""
+    series = (args.series or "").strip()
+    alias = (args.alias or "").strip()
+    if not series or not alias:
+        log("record-alias: empty series or alias")
+        print("NOOP")
+        return 1
+    if series == alias:
+        log(f"record-alias: series and alias identical ({series!r}) — no-op")
+        print("NOOP")
+        return 0
+    alias_put(series, alias)
+    log(f"recorded alias: {series!r} → {alias!r}")
+    print("OK")
+    return 0
+
+
+def cmd_alias_list(args) -> int:
+    """Dump current alias map as JSON for diagnostics."""
+    p = _alias_path()
+    if not p.is_file():
+        print("{}")
+        return 0
+    print(p.read_text())
+    return 0
 
 
 def cmd_search(args) -> int:
@@ -1024,6 +1144,17 @@ def main() -> int:
 
     s = sub.add_parser("check")
     s.set_defaults(func=cmd_check)
+
+    s = sub.add_parser("record-alias",
+        help="map a parsed-series-name to a dandanplay anime title for "
+             "future auto-match fallback")
+    s.add_argument("series", help="series name as parsed by auto-match")
+    s.add_argument("alias",  help="dandanplay anime title chosen via manual search")
+    s.set_defaults(func=cmd_record_alias)
+
+    s = sub.add_parser("alias-list",
+        help="dump the alias map as JSON")
+    s.set_defaults(func=cmd_alias_list)
 
     args = p.parse_args()
     try:
