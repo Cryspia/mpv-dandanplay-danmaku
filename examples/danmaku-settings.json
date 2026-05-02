@@ -1,0 +1,34 @@
+{
+  "_comment": "Defaults for danmaku-settings.json. Most of these are also tunable from the panel (Shift+F10). filter_keywords is editable here only — fnmatch wildcards: '*' (any chars), '?' (one char), '[abc]' (charset). Whole-text match. The panel UI rewrites this file on save, so put any handcrafted values in BEFORE first running the panel, or add them while the panel is closed.",
+
+  "enabled":         true,
+  "render_mode":     "original",
+  "opacity":         0.75,
+  "speed":           144,
+  "font_size":       36,
+  "density":         "medium",
+  "area":            0.8,
+  "chConvert":       1,
+  "stroke_width":    2.0,
+  "font":            "Microsoft YaHei,Noto Sans CJK SC,sans-serif",
+
+  "filter_keywords": [
+    "*广告*",
+    "*spoiler*",
+    "QQ群?*"
+  ],
+
+  "_disabled_sources_help": "Drop comments by source platform. Names listed are filtered out. Choices: bilibili, gamer, dandanplay, other. Empty list = show everything (default). Mirrors uf-hy/jellyfin-danmaku's 弹幕来源 panel (B站/巴哈/弹弹/其他).",
+  "disabled_sources": [],
+
+  "dedup":           true,
+  "dedup_window":    1.0,
+  "dedup_min_count": 5,
+
+  "_anti_overlap_help": "When true, comments that can't fit a free lane are dropped instead of stacking. Within-pool only — does not prevent cross-mode clashes (a top-fixed and a scroll on the same row). Default on; flip off if you'd rather keep all comments and tolerate same-pool overlap.",
+  "anti_overlap":    true,
+
+  "_time_offset_help": "Per-episode time offsets are NOT in this file — they live in the cache directory's offsets.json (keyed by episodeId). Use panel row 时间偏移 (Shift+F10) on the matched episode.",
+
+  "show_modes":      [1, 4, 5, 6]
+}

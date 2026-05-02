@@ -1,0 +1,5 @@
+{
+  "_comment": "General config — proxy URL etc. The default CORS proxy is the cf_worker.js deployment generously kept online by upstream Izumiko/Jellyfin-Danmaku; replace it with your own deployment (or, better, register an AppId/AppSecret with dandanplay and put them in danmaku-credentials.json so this proxy is bypassed entirely).",
+
+  "cors_proxy": "https://ddplay-api.930524.xyz/cors/"
+}
