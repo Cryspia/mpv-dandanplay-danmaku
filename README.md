@@ -1,4 +1,4 @@
-# mpv-dandanplay-danmuku
+# mpv-dandanplay-danmaku
 
 [简体中文](./README.zh-CN.md)
 
@@ -67,8 +67,8 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
 ### One-liner (Linux / macOS / Windows)
 
 ```bash
-git clone https://github.com/Cryspia/mpv-dandanplay-danmuku.git
-cd mpv-dandanplay-danmuku
+git clone https://github.com/Cryspia/mpv-dandanplay-danmaku.git
+cd mpv-dandanplay-danmaku
 python3 install.py
 ```
 
@@ -247,7 +247,7 @@ to your own CloudFlare Workers account and put its URL in
 ## Project layout
 
 ```
-mpv-dandanplay-danmuku/
+mpv-dandanplay-danmaku/
 ├── README.md                       # this file
 ├── README.zh-CN.md                 # Chinese version
 ├── LICENSE                         # MIT, with attribution

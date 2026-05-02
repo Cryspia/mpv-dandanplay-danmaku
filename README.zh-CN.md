@@ -1,4 +1,4 @@
-# mpv-dandanplay-danmuku
+# mpv-dandanplay-danmaku
 
 [English](./README.md)
 
@@ -38,8 +38,8 @@
 ### 一行命令（Linux / macOS / Windows）
 
 ```bash
-git clone https://github.com/Cryspia/mpv-dandanplay-danmuku.git
-cd mpv-dandanplay-danmuku
+git clone https://github.com/Cryspia/mpv-dandanplay-danmaku.git
+cd mpv-dandanplay-danmaku
 python3 install.py
 ```
 
@@ -167,7 +167,7 @@ mpv 开始播放时脚本会尝试匹配：
 ## 项目结构
 
 ```
-mpv-dandanplay-danmuku/
+mpv-dandanplay-danmaku/
 ├── README.md                       # 英文版
 ├── README.zh-CN.md                 # 本文件
 ├── LICENSE                         # MIT，含上游致谢

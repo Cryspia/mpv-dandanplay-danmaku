@@ -44,7 +44,7 @@ from typing import Any
 # Constants & defaults — match upstream Izumiko/Jellyfin-Danmaku
 # ============================================================================
 DDP_API = "https://api.dandanplay.net"
-USER_AGENT = "mpv-dandanplay-danmuku/1.0"
+USER_AGENT = "mpv-dandanplay-danmaku/1.0"
 
 # Default CORS-proxying CF Worker. This proxy bundles dandanplay v2 auth
 # server-side so unauthenticated clients can still query the API. We use

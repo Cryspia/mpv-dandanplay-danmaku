@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-platform installer for mpv-dandanplay-danmuku.
+"""Cross-platform installer for mpv-dandanplay-danmaku.
 
 Drops the script bundle into mpv's `scripts/` directory and seeds the
 config files (skipping anything the user has already customized).
