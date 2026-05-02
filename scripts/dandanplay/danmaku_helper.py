@@ -143,7 +143,7 @@ DEFAULT_SETTINGS = {
     # bare-id (native dandanplay), or [Other]… (iqiyi/acfun/tucao/etc.).
     # Listed names are *disabled*; empty list = show everything.
     # Valid values: "bilibili", "gamer", "dandanplay", "other".
-    # Mirrors uf-hy/jellyfin-danmaku's 弹幕过滤 panel (B站/巴哈/弹弹/其他).
+    # Mirrors Izumiko/Jellyfin-Danmaku's 弹幕过滤 panel (B站/巴哈/弹弹/其他).
     "disabled_sources": [],
     # Keyword filter: any comment whose text matches ANY pattern is dropped.
     # Patterns use shell-style wildcards (fnmatch): "*" any chars, "?" one
@@ -545,7 +545,7 @@ def _normalize_mode(m: int) -> int | None:
 
 def _classify_source(user: str) -> str:
     """Classify a dandanplay comment's user-field tag into a source bucket.
-    Mirrors uf-hy/jellyfin-danmaku's preProcessDanmaku:
+    Mirrors Izumiko/Jellyfin-Danmaku's preProcessDanmaku:
         [BiliBili]…  → bilibili
         [Gamer]…     → gamer
         [Other…]…    → other  (any [Source] prefix that isn't BiliBili/Gamer)

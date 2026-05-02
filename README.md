@@ -15,15 +15,13 @@ renders them as a moving ASS subtitle track.
 This project is a **port and re-implementation of large parts of
 [Izumiko/Jellyfin-Danmaku](https://github.com/Izumiko/Jellyfin-Danmaku)**
 — the popular browser-side userscript that adds danmaku to Jellyfin's
-web UI. The match algorithm, the source-tag classification, the comment
+web UI. The match algorithm, the source-platform filter
+(B站 / 巴哈 / 弹弹 / 其他), the source-tag classification, the comment
 de-duplication heuristic, the anti-overlap lane filter, and the CORS
-proxy fallback all derive directly from that project. We've also picked
-up a few ideas from the active fork
-[uf-hy/jellyfin-danmaku](https://github.com/uf-hy/jellyfin-danmaku),
-specifically its source-platform filter (B站 / 巴哈 / 弹弹 / 其他).
+proxy fallback all derive directly from that project.
 
-If you use this script, **please also star and support those upstream
-projects** — they did the hard product-design work, we just translated
+If you use this script, **please also star and support that upstream
+project** — they did the hard product-design work, we just translated
 it from JavaScript-in-the-browser to Lua-in-mpv.
 
 ## Features

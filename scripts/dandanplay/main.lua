@@ -129,7 +129,7 @@ local DEFAULT_SETTINGS = {
     -- "rtl" (force everyone right→left), or "ltr".
     render_mode = "original",
     show_modes = {1, 4, 5, 6},
-    -- Source filter (uf-hy/jellyfin-danmaku parity): names listed here are
+    -- Source filter (Izumiko/Jellyfin-Danmaku parity): names listed here are
     -- *disabled*. Valid: "bilibili", "gamer", "dandanplay", "other".
     disabled_sources = {},
     -- Wildcard keyword filter (fnmatch syntax). Persisted; survives uninstall.

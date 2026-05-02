@@ -18,7 +18,7 @@
     "QQ群?*"
   ],
 
-  "_disabled_sources_help": "Drop comments by source platform. Names listed are filtered out. Choices: bilibili, gamer, dandanplay, other. Empty list = show everything (default). Mirrors uf-hy/jellyfin-danmaku's 弹幕来源 panel (B站/巴哈/弹弹/其他).",
+  "_disabled_sources_help": "Drop comments by source platform. Names listed are filtered out. Choices: bilibili, gamer, dandanplay, other. Empty list = show everything (default). Mirrors Izumiko/Jellyfin-Danmaku's 弹幕来源 panel (B站/巴哈/弹弹/其他).",
   "disabled_sources": [],
 
   "dedup":           true,
