@@ -30,6 +30,12 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
   by Jellyfin metadata.
 - **Manual fuzzy search** (Ctrl+F10) with two-stage picker:
   search → choose anime → choose episode.
+- **Smart-match alias fallback**: when your library's title for a show
+  differs from dandanplay's anime title, the first time you manually
+  pick the right one we remember the mapping. Future episodes of the
+  same series whose primary search returns nothing automatically retry
+  using the picked title — no manual search needed. Mapping is stored
+  in `aliases.json` (cache dir) and persists across sessions.
 - **In-player settings panel** (Shift+F10) for opacity / font size /
   speed / density / display area / render mode / anti-overlap /
   source filter / dedup / per-episode time offset, etc.
@@ -61,7 +67,7 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
 ### One-liner (Linux / macOS / Windows)
 
 ```bash
-git clone https://github.com/<your-user>/mpv-dandanplay-danmuku.git
+git clone https://github.com/Cryspia/mpv-dandanplay-danmuku.git
 cd mpv-dandanplay-danmuku
 python3 install.py
 ```
@@ -129,6 +135,22 @@ If auto-match misses, hit `Ctrl+F10`:
    `Enter` loads the danmaku.
 
 The match is cached so the same series + episode auto-loads next time.
+
+### Smart-match alias
+
+After you manually pick "尖帽子的魔法工房" for a file whose library
+title is "Magic Workshop", the script records that mapping. The next
+time you play another episode of the same series (e.g.
+`Magic Workshop S1E6.mkv`):
+
+1. Auto-match parses "Magic Workshop" and queries dandanplay.
+2. Zero hits → it consults `aliases.json` and finds the prior mapping
+   "Magic Workshop → 尖帽子的魔法工房".
+3. Re-queries with "尖帽子的魔法工房" + episode 6 → match → loads.
+
+No manual intervention. The alias map lives at `<cache>/aliases.json`,
+inspectable via `python3 danmaku_helper.py alias-list`. Edit the file
+directly to remove or adjust entries.
 
 ### Keybindings
 
