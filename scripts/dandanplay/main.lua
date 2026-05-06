@@ -368,6 +368,24 @@ end
 -- ============================================================================
 -- Helper subprocess wrapper
 -- ============================================================================
+-- Normalize subprocess output line endings. Python on Windows defaults
+-- to text-mode stdout which writes \r\n, but our parsing patterns
+-- (gmatch "[^\n]+", anchored "^EPID:(%d+)$" etc.) treat \r as part of
+-- the line content — the trailing \r breaks the anchored match and
+-- the user gets a false "no match" report. Strip CR universally.
+local function normalize_eol(s)
+    if not s then return "" end
+    return (s:gsub("\r\n", "\n"):gsub("\r", "\n"):gsub("\n+$", ""))
+end
+
+local function _normalize_result(r)
+    if r then
+        r.stdout = normalize_eol(r.stdout)
+        r.stderr = normalize_eol(r.stderr)
+    end
+    return r
+end
+
 local function helper_run_sync(args)
     local full = {PYTHON, HELPER}
     for _, a in ipairs(args) do table.insert(full, a) end
@@ -379,7 +397,7 @@ local function helper_run_sync(args)
         capture_stderr = true,
         playback_only = false,
     })
-    return r  -- {status, stdout, stderr, error_string, killed_by_us}
+    return _normalize_result(r)  -- {status, stdout, stderr, error_string, killed_by_us}
 end
 
 -- Async variant for matching (so we don't block file-load)
@@ -392,7 +410,9 @@ local function helper_run_async(args, callback)
         capture_stdout = true,
         capture_stderr = true,
         playback_only = false,
-    }, callback)
+    }, function(success, result, err)
+        callback(success, _normalize_result(result), err)
+    end)
 end
 
 -- ============================================================================

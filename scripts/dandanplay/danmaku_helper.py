@@ -40,6 +40,18 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+# Force stdout/stderr to UTF-8. On Windows, Python's PIPE encoding
+# defaults to the system codepage (cp936 on Chinese Windows), which
+# would mangle CJK content like "SERIES:尖帽子的魔法工房" into the
+# subprocess pipe — mpv's Lua side reads bytes with no idea what
+# encoding they're in, and any non-ASCII match anchors break.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
 # ============================================================================
 # Constants & defaults — match upstream Izumiko/Jellyfin-Danmaku
 # ============================================================================
@@ -179,7 +191,7 @@ def load_settings() -> dict:
     s = dict(DEFAULT_SETTINGS)
     if SETTINGS_FILE.is_file():
         try:
-            s.update(json.loads(SETTINGS_FILE.read_text()))
+            s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except Exception as e:
             log(f"settings file unreadable, using defaults ({e})")
     return s
@@ -198,7 +210,7 @@ def cache_get(key: str) -> int | None:
     if not p.is_file():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         v = data.get(key)
         return int(v) if v else None
     except Exception:
@@ -210,11 +222,12 @@ def cache_put(key: str, episode_id: int) -> None:
     data = {}
     if p.is_file():
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             data = {}
     data[key] = int(episode_id)
-    p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                 encoding="utf-8")
 
 
 # ============================================================================
@@ -245,7 +258,7 @@ def alias_get(series: str) -> str | None:
     if not p.is_file():
         return None
     try:
-        data = json.loads(p.read_text())
+        data = json.loads(p.read_text(encoding="utf-8"))
         v = data.get(series)
         return v if isinstance(v, str) and v else None
     except Exception:
@@ -263,13 +276,14 @@ def alias_put(series: str, alias: str) -> None:
     data: dict[str, str] = {}
     if p.is_file():
         try:
-            d = json.loads(p.read_text())
+            d = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(d, dict):
                 data = {k: v for k, v in d.items() if isinstance(v, str)}
         except Exception:
             data = {}
     data[series] = alias
-    p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False),
+                 encoding="utf-8")
 
 
 # ============================================================================
@@ -286,7 +300,7 @@ def _load_config() -> dict:
     }
     if CONFIG_FILE.is_file():
         try:
-            d = json.loads(CONFIG_FILE.read_text())
+            d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             for k in ("cors_proxy", "app_id", "app_secret"):
                 if d.get(k):
                     cfg[k] = d[k]
@@ -294,7 +308,7 @@ def _load_config() -> dict:
             log(f"config file unreadable ({e})")
     if CREDENTIALS_FILE.is_file():
         try:
-            d = json.loads(CREDENTIALS_FILE.read_text())
+            d = json.loads(CREDENTIALS_FILE.read_text(encoding="utf-8"))
             for k in ("app_id", "app_secret"):
                 if d.get(k):
                     cfg[k] = d[k]
@@ -1028,7 +1042,7 @@ def cmd_alias_list(args) -> int:
     if not p.is_file():
         print("{}")
         return 0
-    print(p.read_text())
+    print(p.read_text(encoding="utf-8"))
     return 0
 
 
