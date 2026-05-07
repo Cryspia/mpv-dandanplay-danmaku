@@ -1446,11 +1446,27 @@ mp.add_key_binding("MBTN_LEFT", "danmaku-click", function()
     end
 end)
 
--- Track mouse activity for the OSC visibility heuristic
-mp.add_key_binding("MOUSE_MOVE", "danmaku-mousetrack", function()
+-- Track mouse activity for the OSC-visibility heuristic.
+--
+-- We can't use mp.add_key_binding("MOUSE_MOVE", ...) here: when the
+-- OSC is on screen, its own input section captures mouse events in
+-- the region it occupies, and our key binding never fires. The
+-- symptom is exactly inverted from intent — icon visible when OSC
+-- is hidden (no input-section interference) and hidden when OSC is
+-- showing (events swallowed). observe_property("mouse-pos") sits
+-- below the input-section dispatch and fires on every cursor change
+-- regardless of which script "owns" the mouse area.
+local _last_pos
+mp.observe_property("mouse-pos", "native", function(_, pos)
+    if not pos then return end
+    -- Property fires on every redraw; only count actual movement.
+    if _last_pos and _last_pos.x == pos.x and _last_pos.y == pos.y then
+        return
+    end
+    _last_pos = pos
     state.cursor_last = mp.get_time()
     update_icon_overlay()
-end, {repeatable=true, complex=true})
+end)
 
 -- Periodic refresh so the icon hides after the cursor stops moving
 mp.add_periodic_timer(0.5, update_icon_overlay)
