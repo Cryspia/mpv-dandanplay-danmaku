@@ -35,6 +35,15 @@
 
 ## 安装
 
+### 更省事的方案：一键整套环境
+
+如果你不想自己折腾 mpv 配置，两个兄弟项目提供已经配好的 jellyfin-mpv-shim（自带 mpv，本弹幕插件也已预装），开箱即用、最大努力开启了超分和插帧。两套都是 portable / 隔离环境，不动你系统里现有的 Python / mpv / 多媒体库：
+
+- [**Cryspia/windows-jellyfin-mpv-rife**](https://github.com/Cryspia/windows-jellyfin-mpv-rife) —— Windows 10/11 x64 + NVIDIA RTX 30 系或更新的 GPU。PowerShell 一键脚本，运行时全部装在 `jellyfin-mpv-shim-portable/` 目录下。使用 RIFE + NVIDIA RTX Video Super Resolution。
+- [**Cryspia/dgxspark-jellyfin-mpv-rife**](https://github.com/Cryspia/dgxspark-jellyfin-mpv-rife) —— NVIDIA DGX Spark（GB10，ARM64）+ Ubuntu 24.04。在 Miniforge 隔离 conda 环境里从源码编译 mpv，使用 TensorRT 编译的 RIFE + FSRCNNX 亮度超分。
+
+两个平台跑出来的效果都比 Jellyfin 网页播放器强不少，更接近专业媒体播放器的体验。如果你的硬件不在覆盖范围内，照下面的手动安装步骤来即可。
+
 ### 一行命令（Linux / macOS / Windows）
 
 ```bash

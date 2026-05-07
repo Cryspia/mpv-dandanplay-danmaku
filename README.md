@@ -64,6 +64,28 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
 
 ## Installation
 
+### Easier path: turnkey installers
+
+If you don't want to deal with mpv setup yourself, two companion
+projects ship a pre-configured jellyfin-mpv-shim (with mpv bundled
+in and this danmaku plugin already wired up), tuned for best-effort
+upscaling + frame interpolation. Both stay self-contained and don't
+touch your system Python / mpv / video libs:
+
+- [**Cryspia/windows-jellyfin-mpv-rife**](https://github.com/Cryspia/windows-jellyfin-mpv-rife)
+  — Windows 10/11 x64 with an NVIDIA RTX 30-series+ GPU. Portable
+  PowerShell installer; everything lives under
+  `jellyfin-mpv-shim-portable/`. Uses RIFE + NVIDIA RTX Video Super
+  Resolution.
+- [**Cryspia/dgxspark-jellyfin-mpv-rife**](https://github.com/Cryspia/dgxspark-jellyfin-mpv-rife)
+  — NVIDIA DGX Spark (GB10, ARM64) on Ubuntu 24.04. Builds mpv from
+  source inside an isolated Miniforge env. Uses TensorRT-compiled
+  RIFE + FSRCNNX luma upscaling.
+
+The result on either platform is closer to a dedicated media-player
+experience than the Jellyfin web client. If neither matches your
+hardware, install manually below.
+
 ### One-liner (Linux / macOS / Windows)
 
 ```bash
