@@ -487,6 +487,12 @@ local function load_ass(path, count)
     end
 end
 
+-- Forward declaration: set_visible() can fire a lazy match when the
+-- user toggles danmaku on, but trigger_match is defined further down.
+-- Hoisting the local lets the closure in set_visible bind to the same
+-- slot that the later `function trigger_match()` assignment fills in.
+local trigger_match
+
 local function set_visible(on)
     settings.enabled = on
     settings_save()
@@ -494,6 +500,14 @@ local function set_visible(on)
         mp.set_property("secondary-sub-visibility", on and "yes" or "no")
     end
     update_icon_overlay()
+    -- Lazy match: if the user just toggled on and the file-loaded
+    -- handler skipped the auto-search (because we were off), kick a
+    -- match now. Compares against state.file_id, which is bumped on
+    -- every file-loaded — so this also catches "toggled off, switched
+    -- file, toggled on" without re-fetching the previous file.
+    if on and state.search_done_for_file_id ~= state.file_id then
+        trigger_match()
+    end
 end
 
 -- ============================================================================
@@ -531,9 +545,15 @@ local function parse_jellyfin_title(t)
     return t, nil, nil
 end
 
-local function trigger_match()
+-- Assigns to the local hoisted above set_visible. Not `local function`
+-- here — that would shadow the forward declaration.
+function trigger_match()
     state.file_id = state.file_id + 1
     local mine = state.file_id
+    -- Mark that we've kicked an auto/manual match for this file_id so
+    -- a later `set_visible(true)` doesn't re-fetch what's already in
+    -- flight or already finished.
+    state.search_done_for_file_id = mine
     state.last_status = "loading"
     state.last_count = 0
     update_icon_overlay()
@@ -1485,6 +1505,20 @@ mp.register_event("file-loaded", function()
     unload_current_sub()
     state.last_match_episode = nil
     state.last_count = 0
+
+    -- If the user has danmaku toggled off, skip the auto-match entirely
+    -- — no DDP API call, no helper invocation, no disk write. Bump
+    -- file_id ourselves so any inflight callback from the previous file
+    -- is silently dropped (it checks `mine ~= state.file_id`). When the
+    -- user toggles back on, `set_visible(true)` kicks trigger_match
+    -- lazily via the search_done_for_file_id guard.
+    if not settings.enabled then
+        state.file_id = state.file_id + 1
+        state.last_status = "idle"
+        update_icon_overlay()
+        return
+    end
+
     state.last_status = "loading"   -- show "loading" while we wait
     update_icon_overlay()
 
