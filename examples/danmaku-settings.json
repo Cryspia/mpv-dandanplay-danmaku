@@ -25,6 +25,10 @@
   "dedup_window":    1.0,
   "dedup_min_count": 5,
 
+  "_aggregate_emphasis_help": "When dedup collapses a chain into a [+N]-tagged line, render that line bolder and aggregate_font_bonus px larger so spikes stand out. Vertical position is unchanged (taller text may overlap neighbors slightly); horizontal lane timing is recomputed for the enlarged width.",
+  "aggregate_emphasis":    true,
+  "aggregate_font_bonus":  4,
+
   "_anti_overlap_help": "When true, comments that can't fit a free lane are dropped instead of stacking. Within-pool only — does not prevent cross-mode clashes (a top-fixed and a scroll on the same row). Default on; flip off if you'd rather keep all comments and tolerate same-pool overlap.",
   "anti_overlap":    true,
 

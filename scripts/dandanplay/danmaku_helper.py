@@ -170,6 +170,14 @@ DEFAULT_SETTINGS = {
     "dedup": True,
     "dedup_window": 1.0,        # seconds — chain breaks if next dup is later than this
     "dedup_min_count": 5,       # only show [+N] when the group has at least this many
+    # Visual emphasis for collapsed spike lines: when on, the [+N]-annotated
+    # comment renders bolder and ~aggregate_font_bonus px larger than baseline
+    # so spikes stand out. Vertical position still uses the normal lane y, so
+    # the taller text may slightly overlap neighbors above/below — acceptable
+    # because aggregated lines are rare. Horizontal width is recomputed at the
+    # enlarged size so lane-collision timing stays correct.
+    "aggregate_emphasis": True,
+    "aggregate_font_bonus": 4,  # extra px of font size for [+N] lines
     # Anti-overlap: when on, comments that can't find a free lane are
     # *dropped* instead of stacked on top of an existing comment. Applies
     # independently to scroll/top/bottom lane pools — does NOT prevent
@@ -843,7 +851,13 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
     skipped_overlap = 0
 
     # If dedup found chains of size >= dedup_min_count, append "[+N]" to
-    # the kept comment so the user can see the spike.
+    # the kept comment so the user can see the spike. We also record the
+    # *identity* of each annotated Comment so the render loop below can
+    # apply visual emphasis without re-parsing the text (and without
+    # depending on the post-sort index).
+    emphasis_on = bool(settings.get("aggregate_emphasis", True))
+    font_bonus = float(settings.get("aggregate_font_bonus", 4))
+    aggregated_ids: set[int] = set()
     min_count = int(settings.get("dedup_min_count", 5))
     for idx, count in chain_counts.items():
         if count >= min_count and 0 <= idx < len(comments):
@@ -851,12 +865,16 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
             comments[idx] = Comment(time=old.time, mode=old.mode,
                                     color=old.color,
                                     text=f"{old.text}[+{count - 1}]")
+            aggregated_ids.add(id(comments[idx]))
 
     # _dedup_comments already returns sorted-by-time, but be explicit
     # in case dedup is off.
     comments = sorted(comments, key=lambda c: c.time)
 
     for c in comments:
+        # Capture the [+N] emphasis flag *before* render_mode rebinds c to
+        # a fresh Comment (which would invalidate the id() lookup).
+        is_aggregated = emphasis_on and id(c) in aggregated_ids
         # Apply render_mode override: convert all comments to one display
         # style (RTL by default — the universal "弹幕" expectation).
         # In "original" mode, honor the source tag and apply show_modes.
@@ -873,13 +891,32 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
             continue
 
         text = _escape_ass(c.text)
+        # Effective font size and emphasis override for this comment.
+        # Aggregated [+N] lines render larger + bold so spikes stand out.
+        # `ScaledBorderAndShadow: yes` (in the style header) means the
+        # stroke scales with \fs automatically, so we don't override \bord;
+        # we *do* pass the scaled stroke into the width measurement so
+        # lane-collision timing matches the on-screen footprint.
+        if is_aggregated:
+            eff_font = base_font + font_bonus
+            stroke_eff = stroke * (eff_font / base_font)
+            # libass synthesizes bold by drawing slightly wider strokes when
+            # no native bold face exists; either way the glyph advance grows
+            # by a few percent. 1.08 is a conservative inflation.
+            bold_w_factor = 1.08
+            emphasis_tag = f"\\fs{int(round(eff_font))}\\b1"
+        else:
+            eff_font = base_font
+            stroke_eff = stroke
+            bold_w_factor = 1.0
+            emphasis_tag = ""
         # Two width values:
         #   tw       — raw measured width, used for the \move start/end x
         #              coords (where the comment is *drawn*).
         #   tw_safe  — tw + safety pixels, used for lane-clear timing
         #              (so two same-lane comments never visually overlap
         #              even when our em-based measurement is a few px off).
-        tw_measured = _measure_text_px(c.text, base_font, stroke)
+        tw_measured = _measure_text_px(c.text, eff_font, stroke_eff) * bold_w_factor
         tw = max(50, int(round(tw_measured)))
         tw_safe = tw_measured + _LANE_SAFETY_PX
         col = _color_to_ass(c.color)
@@ -906,7 +943,7 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
                 x_start, x_end = -tw // 2, W + tw // 2
 
             tag = (f"{{\\an5\\move({x_start},{y},{x_end},{y})"
-                   f"\\1c{col}\\3a&H{alpha_hex}}}")
+                   f"\\1c{col}\\3a&H{alpha_hex}{emphasis_tag}}}")
             out_lines.append(
                 f"Dialogue: 0,{_ass_time(c.time)},{_ass_time(end_t)},"
                 f"DM,,0,0,0,,{tag}{text}")
@@ -920,7 +957,8 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
                 continue
             top_lane_free[lane] = end_t
             y = int(lane * line_h + line_h * 0.5)
-            tag = (f"{{\\an8\\pos({W//2},{y})\\1c{col}\\3a&H{alpha_hex}}}")
+            tag = (f"{{\\an8\\pos({W//2},{y})"
+                   f"\\1c{col}\\3a&H{alpha_hex}{emphasis_tag}}}")
             out_lines.append(
                 f"Dialogue: 0,{_ass_time(c.time)},{_ass_time(end_t)},"
                 f"DM,,0,0,0,,{tag}{text}")
@@ -934,7 +972,8 @@ def comments_to_ass(comments: list[Comment], settings: dict) -> tuple[str, int]:
                 continue
             bot_lane_free[lane] = end_t
             y = int(H - (lane * line_h + line_h * 0.5))
-            tag = (f"{{\\an2\\pos({W//2},{y})\\1c{col}\\3a&H{alpha_hex}}}")
+            tag = (f"{{\\an2\\pos({W//2},{y})"
+                   f"\\1c{col}\\3a&H{alpha_hex}{emphasis_tag}}}")
             out_lines.append(
                 f"Dialogue: 0,{_ass_time(c.time)},{_ass_time(end_t)},"
                 f"DM,,0,0,0,,{tag}{text}")

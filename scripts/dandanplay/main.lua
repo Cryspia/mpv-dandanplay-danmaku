@@ -138,6 +138,9 @@ local DEFAULT_SETTINGS = {
     dedup = true,
     dedup_window = 1.0,
     dedup_min_count = 5,
+    -- Visual emphasis for [+N] spike lines: render bolder + larger.
+    aggregate_emphasis = true,
+    aggregate_font_bonus = 4,
     -- Anti-overlap: when true, comments that can't fit in any free lane
     -- are dropped instead of stacking. Within-pool only (a top-fixed and
     -- a scroll on the same row are different pools and can still clash).
@@ -791,6 +794,13 @@ local PANEL_ROWS = {
                         fmt=function(v) return string.format("%.1f s", v) end},
     {key="dedup_min_count", label="标注阈值", values={3, 5, 10, 20},
                         fmt=function(v) return string.format("≥ %d 条标 [+N]", v) end},
+    {key="aggregate_emphasis", label="[+N] 醒目", values={false, true},
+                        fmt=function(v) return v and "加粗+放大" or "关" end},
+    {key="aggregate_font_bonus", label="[+N] 字号", values={0, 2, 4, 6, 8, 10},
+                        fmt=function(v)
+                            if v == 0 then return "无" end
+                            return string.format("+%d px", v)
+                        end},
 
     {section=true, label="── 操作 ──"},
     -- Action rows (label_fn for dynamic state).
