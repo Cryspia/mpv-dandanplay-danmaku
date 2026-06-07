@@ -37,12 +37,13 @@
 
 ### 更省事的方案：一键整套环境
 
-如果你不想自己折腾 mpv 配置，两个兄弟项目提供已经配好的 jellyfin-mpv-shim（自带 mpv，本弹幕插件也已预装），开箱即用、最大努力开启了超分和插帧。两套都是 portable / 隔离环境，不动你系统里现有的 Python / mpv / 多媒体库：
+如果你不想自己折腾 mpv 配置，三个兄弟项目提供已经配好的 jellyfin-mpv-shim（自带 mpv，本弹幕插件也已预装），开箱即用、最大努力开启了超分和插帧：
 
-- [**Cryspia/windows-jellyfin-mpv-rife**](https://github.com/Cryspia/windows-jellyfin-mpv-rife) —— Windows 10/11 x64 + NVIDIA RTX 30 系或更新的 GPU。PowerShell 一键脚本，运行时全部装在 `jellyfin-mpv-shim-portable/` 目录下。使用 RIFE + NVIDIA RTX Video Super Resolution。
-- [**Cryspia/dgxspark-jellyfin-mpv-rife**](https://github.com/Cryspia/dgxspark-jellyfin-mpv-rife) —— NVIDIA DGX Spark（GB10，ARM64）+ Ubuntu 24.04。在 Miniforge 隔离 conda 环境里从源码编译 mpv，使用 TensorRT 编译的 RIFE + FSRCNNX 亮度超分。
+- [**Cryspia/windows-jellyfin-mpv-rife**](https://github.com/Cryspia/windows-jellyfin-mpv-rife) —— Windows 10/11 x64 + NVIDIA RTX 30 系或更新的 GPU。PowerShell 一键脚本，运行时全部装在 `jellyfin-mpv-shim-portable/` 目录下（自带 Python、VapourSynth、TensorRT、RIFE 模型和 ffmpeg，只用系统里的 NVIDIA 驱动）。使用 TensorRT RIFE 插帧（带混合精度补丁，避免 RTX 50 系上光流溢出导致的伪影）+ NVIDIA 驱动级 Video Super Resolution。
+- [**Cryspia/dgxspark-jellyfin-mpv-rife**](https://github.com/Cryspia/dgxspark-jellyfin-mpv-rife) —— NVIDIA DGX Spark（GB10，ARM64）+ Ubuntu 24.04。在 Miniforge 隔离 conda 环境里从源码编译 mpv，使用 TensorRT 编译的 RIFE + FSRCNNX 亮度超分；4K 内容真实帧 bit-exact 直通（只有合成的中间帧走降采样 → RIFE → 超分这条路径），并用 KrigBilateral 做色度上采样。另有实验性的双机模式，通过 200G RoCE 互联，吞吐约 1.95×。
+- [**Cryspia/macos-jellyfin-mpv-vt**](https://github.com/Cryspia/macos-jellyfin-mpv-vt) —— Apple Silicon Mac，macOS 26+（插帧需 macOS 15.4+）。`install.sh` 通过 Homebrew 安装 mpv + VapourSynth，把 MPV.app 和 Jellyfin MPV Shim.app 装到 `~/Applications`，并接好本弹幕插件。使用 Apple VideoToolbox 做 2× 硬件插帧，神经引擎 + FSRCNNX 做超分，KrigBilateral 重建 4:4:4 色度——全部通过 `libvsvt.dylib`（VapourSynth 到 VideoToolbox 的桥接）实现。
 
-两个平台跑出来的效果都比 Jellyfin 网页播放器强不少，更接近专业媒体播放器的体验。如果你的硬件不在覆盖范围内，照下面的手动安装步骤来即可。
+Windows 和 DGX Spark 两套是完全隔离的 portable 环境，不动你系统里现有的 Python / mpv / 多媒体库；macOS 那套会用 Homebrew 装 mpv + VapourSynth，但其 app 包与配置都隔离在 `~/Applications` 下。三个平台跑出来的效果都比 Jellyfin 网页播放器强不少，更接近专业媒体播放器的体验。如果你的硬件不在覆盖范围内，照下面的手动安装步骤来即可。
 
 ### 一行命令（Linux / macOS / Windows）
 

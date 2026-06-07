@@ -66,25 +66,41 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
 
 ### Easier path: turnkey installers
 
-If you don't want to deal with mpv setup yourself, two companion
+If you don't want to deal with mpv setup yourself, three companion
 projects ship a pre-configured jellyfin-mpv-shim (with mpv bundled
 in and this danmaku plugin already wired up), tuned for best-effort
-upscaling + frame interpolation. Both stay self-contained and don't
-touch your system Python / mpv / video libs:
+upscaling + frame interpolation:
 
 - [**Cryspia/windows-jellyfin-mpv-rife**](https://github.com/Cryspia/windows-jellyfin-mpv-rife)
   — Windows 10/11 x64 with an NVIDIA RTX 30-series+ GPU. Portable
   PowerShell installer; everything lives under
-  `jellyfin-mpv-shim-portable/`. Uses RIFE + NVIDIA RTX Video Super
-  Resolution.
+  `jellyfin-mpv-shim-portable/` (bundles its own Python, VapourSynth,
+  TensorRT, RIFE models and ffmpeg — only the NVIDIA driver comes from
+  your system). Uses TensorRT RIFE frame interpolation (with a
+  mixed-precision patch that avoids optical-flow overflow artifacts on
+  RTX 50-series) + NVIDIA driver-level Video Super Resolution.
 - [**Cryspia/dgxspark-jellyfin-mpv-rife**](https://github.com/Cryspia/dgxspark-jellyfin-mpv-rife)
   — NVIDIA DGX Spark (GB10, ARM64) on Ubuntu 24.04. Builds mpv from
   source inside an isolated Miniforge env. Uses TensorRT-compiled
-  RIFE + FSRCNNX luma upscaling.
+  RIFE + FSRCNNX luma upscaling, with bit-exact 4K passthrough (only
+  the synthesized in-between frames take the downsample → RIFE → SR
+  path) and KrigBilateral chroma upsampling. Has an experimental
+  dual-machine mode over 200G RoCE for ~1.95× throughput.
+- [**Cryspia/macos-jellyfin-mpv-vt**](https://github.com/Cryspia/macos-jellyfin-mpv-vt)
+  — Apple Silicon Macs on macOS 26+ (macOS 15.4+ for interpolation).
+  `install.sh` installs mpv + VapourSynth via Homebrew, drops MPV.app
+  and Jellyfin MPV Shim.app under `~/Applications`, and wires up this
+  danmaku plugin. Uses Apple VideoToolbox for 2× hardware frame
+  interpolation, the Neural Engine + FSRCNNX for super-resolution, and
+  KrigBilateral for 4:4:4 chroma reconstruction — all via a
+  `libvsvt.dylib` bridge from VapourSynth to VideoToolbox.
 
-The result on either platform is closer to a dedicated media-player
-experience than the Jellyfin web client. If neither matches your
-hardware, install manually below.
+The Windows and DGX Spark builds stay fully self-contained and don't
+touch your system Python / mpv / video libs; the macOS build leans on
+Homebrew for mpv + VapourSynth but keeps its app bundles and configs
+isolated under `~/Applications`. The result on any of them is closer
+to a dedicated media-player experience than the Jellyfin web client.
+If none matches your hardware, install manually below.
 
 ### One-liner (Linux / macOS / Windows)
 
