@@ -442,12 +442,50 @@ def parse_filename(name: str) -> tuple[str, int | None, int | None]:
 # ============================================================================
 # Match resolution — given metadata, find a dandanplay episodeId
 # ============================================================================
+# Query normalisation before hitting dandanplay's search. Two media-server
+# (Jellyfin/Plex/Emby) artifacts break matching:
+#
+#  1. Bracketed release year, e.g. "罗小黑战记 2 (2025)". dandanplay doesn't
+#     expect it. We strip only *bracketed* years — a bare trailing year is
+#     kept because some titles legitimately end in one ("2046",
+#     "Blade Runner 2049").
+#
+#  2. A space between a CJK title and a sequel/season number, e.g.
+#     "罗小黑战记 2". dandanplay tokenises the query on spaces, so
+#     "罗小黑战记 2" matches the base title "罗小黑战记" (the WRONG season —
+#     or zero results, as with "命运石之门 0") while the space-free
+#     "罗小黑战记2" / "刀剑神域2" / "命运石之门0" precisely matches the sequel.
+#     We join a space only when it sits between a CJK ideograph and a digit;
+#     spaces inside Latin titles ("Re Zero", "Blade Runner 2049") are left
+#     intact so they aren't mangled.
+#
+# Applied to the FINAL query — after the season number is appended — so the
+# appended "刀剑神域 2" gets joined to "刀剑神域2" too. The filename path
+# already drops "(...)" tags in parse_filename(); this also covers the
+# Jellyfin path, which feeds the title in verbatim.
+_YEAR_BRACKET_RE = re.compile(r"\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*")
+_CJK_DIGIT_SPACE_RE = re.compile(
+    r"(?<=[一-鿿])\s+(?=\d)|(?<=\d)\s+(?=[一-鿿])"
+)
+
+
+def _normalize_search_query(query: str) -> str:
+    """Strip a bracketed release year and join CJK↔digit spaces so the
+    dandanplay search lands on the right title. Returns the input
+    unchanged if normalisation would leave it empty (defensive)."""
+    q = _YEAR_BRACKET_RE.sub(" ", query)
+    q = re.sub(r"\s{2,}", " ", q).strip()
+    q = _CJK_DIGIT_SPACE_RE.sub("", q)
+    return q or query.strip()
+
+
 def _search_with_season(title: str, season: int | None,
                         episode: int | None) -> list[dict]:
     """Run a single ddp search, appending the season number to non-S1 titles."""
     query = title.strip()
     if season and season > 1:
         query = f"{query} {season}"
+    query = _normalize_search_query(query)
     log(f"searching: anime={query!r} episode={episode}")
     return ddp_search_episodes(query, episode)
 
@@ -1087,7 +1125,10 @@ def cmd_alias_list(args) -> int:
 
 def cmd_search(args) -> int:
     """Print one JSON line per candidate {animeId, animeTitle, episodes:[...]}."""
-    animes = ddp_search_episodes(args.query)
+    # Normalise the query (strip bracketed year, join CJK↔digit spaces)
+    # the same way the auto-match path does — e.g. when the search panel
+    # pre-fills the auto-parsed title "罗小黑战记 2 (2025)".
+    animes = ddp_search_episodes(_normalize_search_query(args.query))
     for a in animes:
         # Trim to essentials so the Lua menu doesn't get massive
         slim = {
