@@ -28,8 +28,14 @@ it from JavaScript-in-the-browser to Lua-in-mpv.
 
 - **Auto-match** by filename or, if launched via `jellyfin-mpv-shim`,
   by Jellyfin metadata.
+- **Season-aware matching**: sequels land on the right season instead of
+  season 1 (`S02E01`, `第二季`, `2nd Season`, romaji titles).
+- **Movie / TV and year disambiguation**: when a film and a series share
+  a name, the file's shape and any `(2016)`-style year decide which wins.
+- **Retry by toggling**: if a search fails, press `F10` off and on again
+  to re-run it. Requests also retry automatically before giving up.
 - **Manual fuzzy search** (Ctrl+F10) with two-stage picker:
-  search → choose anime → choose episode.
+  search → choose anime (with type and release year) → choose episode.
 - **Smart-match alias fallback**: when your library's title for a show
   differs from dandanplay's anime title, the first time you manually
   pick the right one we remember the mapping. Future episodes of the
@@ -162,13 +168,16 @@ When mpv starts playing a file, the script tries to match it:
 Successful matches are cached, so the same series/episode resolves
 instantly next time.
 
+If a search fails (flaky network, proxy hiccup), press **F10** off and
+on again to re-run it — see the keybinding table below.
+
 ### Manual search (Ctrl+F10)
 
 If auto-match misses, hit `Ctrl+F10`:
 
 1. A text input appears: type any fuzzy query (`尖帽子`, `frieren`, …).
-2. **Stage 1 — anime picker**: every anime that matched, with episode
-   count and type. Use `↑↓` / `PgUp/PgDn` / `1-9` to pick.
+2. **Stage 1 — anime picker**: every anime that matched, with its type,
+   release year and episode count. Use `↑↓` / `PgUp/PgDn` / `1-9` to pick.
 3. **Stage 2 — episode picker**: full episode list of the chosen anime.
    `Enter` loads the danmaku.
 
@@ -182,9 +191,10 @@ time you play another episode of the same series (e.g.
 `Magic Workshop S1E6.mkv`):
 
 1. Auto-match parses "Magic Workshop" and queries dandanplay.
-2. Zero hits → it consults `aliases.json` and finds the prior mapping
-   "Magic Workshop → 尖帽子的魔法工房".
-3. Re-queries with "尖帽子的魔法工房" + episode 6 → match → loads.
+2. Nothing scores well enough → it consults `aliases.json` and finds
+   the prior mapping "Magic Workshop → 尖帽子的魔法工房".
+3. The aliased name is appended to the query ladder and re-scored →
+   match → loads.
 
 No manual intervention. The alias map lives at `<cache>/aliases.json`,
 inspectable via `python3 danmaku_helper.py alias-list`. Edit the file
