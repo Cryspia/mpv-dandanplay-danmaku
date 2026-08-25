@@ -170,6 +170,8 @@ local state = {
     parsed_series = nil,           -- helper's SERIES: line from last match attempt
     parsed_season = nil,
     parsed_episode = nil,
+    matched_anime = nil,           -- dandanplay animeTitle we resolved to
+    matched_type = nil,            -- ...and its type (tvseries / movie / …)
 }
 
 -- Icon geometry. Position is right-edge, vertically centered: that's
@@ -315,6 +317,8 @@ local function update_icon_overlay()
         fg = "&HFFFFFF&"; bg = "&H666666&"; bg_alpha = "&H40&"
     elseif state.last_status == "none" or state.last_status == "no_config" then
         fg = "&HBBBBBB&"; bg = "&H222222&"; bg_alpha = "&H80&"
+    elseif state.last_status == "error" then
+        fg = "&HFFFFFF&"; bg = "&H2222AA&"; bg_alpha = "&H60&"  -- red-ish (BGR)
     else
         fg = "&HFFFFFF&"; bg = "&H333333&"; bg_alpha = "&H80&"
     end
@@ -367,6 +371,13 @@ local function update_icon_overlay()
     elseif state.last_status == "loading" then
         hint = string.format(
             "{\\an7\\pos(%d,%d)\\fn%s\\fs12\\1c&HCCCCCC&\\bord1\\3c&H000000&}搜索中...",
+            x + 2,
+            y + ICON_H + 2,
+            ass_font())
+    elseif state.last_status == "error" then
+        -- Reminds the user that the toggle itself is the retry gesture.
+        hint = string.format(
+            "{\\an7\\pos(%d,%d)\\fn%s\\fs12\\1c&H8888FF&\\bord1\\3c&H000000&}失败·可重试",
             x + 2,
             y + ICON_H + 2,
             ass_font())
@@ -490,11 +501,12 @@ local function load_ass(path, count)
     end
 end
 
--- Forward declaration: set_visible() can fire a lazy match when the
--- user toggles danmaku on, but trigger_match is defined further down.
--- Hoisting the local lets the closure in set_visible bind to the same
--- slot that the later `function trigger_match()` assignment fills in.
+-- Forward declarations: set_visible() can fire a lazy match or a re-fetch
+-- when the user toggles danmaku on, but both are defined further down.
+-- Hoisting the locals lets the closure in set_visible bind to the same
+-- slots that the later assignments fill in.
 local trigger_match
+local reload_current
 
 local function set_visible(on)
     settings.enabled = on
@@ -503,13 +515,34 @@ local function set_visible(on)
         mp.set_property("secondary-sub-visibility", on and "yes" or "no")
     end
     update_icon_overlay()
-    -- Lazy match: if the user just toggled on and the file-loaded
-    -- handler skipped the auto-search (because we were off), kick a
-    -- match now. Compares against state.file_id, which is bumped on
-    -- every file-loaded — so this also catches "toggled off, switched
-    -- file, toggled on" without re-fetching the previous file.
-    if on and state.search_done_for_file_id ~= state.file_id then
-        trigger_match()
+    if not on then return end
+
+    -- Toggling danmaku ON doubles as "(re)try matching this file". Two
+    -- situations lead here:
+    --
+    --   1. The file loaded while danmaku was off, so the auto-search was
+    --      skipped entirely (search_done_for_file_id lags file_id).
+    --   2. A search DID run for this file but produced nothing usable —
+    --      the API was unreachable, the proxy hiccuped, or the title
+    --      didn't resolve. last_match_episode is still nil in that case,
+    --      and off→on is the obvious retry gesture, so honour it instead
+    --      of making the user go through the manual search panel.
+    --
+    -- A search already in flight is left alone, and a file that matched
+    -- successfully is never re-fetched — toggling visibility on a loaded
+    -- track costs nothing and must stay instant.
+    if state.last_status == "loading" then return end
+    if state.search_done_for_file_id ~= state.file_id then
+        trigger_match()                       -- case 1: never searched
+    elseif state.last_match_episode == nil then
+        mp.osd_message("弹幕: 重新搜索中...", 1.5)
+        trigger_match()                       -- case 2: the search itself failed
+    elseif state.last_status == "error" then
+        -- The match resolved but downloading or rendering the comments
+        -- fell over. The episode id is still good, so re-run just the
+        -- fetch rather than the whole search.
+        mp.osd_message("弹幕: 重新加载中...", 1.5)
+        reload_current()
     end
 end
 
@@ -598,6 +631,7 @@ function trigger_match()
         --   EPISODE:<n>             (when known)
         -- Capture all of them so we can record an alias on manual pick.
         local epid, parsed_series, parsed_season, parsed_episode
+        local matched_anime, matched_type, helper_error
         for line in stdout:gmatch("[^\n]+") do
             local v = line:match("^EPID:(%d+)$")
             if v then epid = v end
@@ -607,10 +641,34 @@ function trigger_match()
             if v then parsed_season = tonumber(v) end
             v = line:match("^EPISODE:(%d+)$")
             if v then parsed_episode = tonumber(v) end
+            -- ANIME/TYPE name the dandanplay entry we landed on, so the
+            -- OSD can show whether we picked the series or the same-named
+            -- movie without the user digging through the log.
+            v = line:match("^ANIME:(.+)$")
+            if v then matched_anime = v end
+            v = line:match("^TYPE:(.+)$")
+            if v then matched_type = v end
+            -- The helper prints ERROR:<what> when the request itself
+            -- failed (network down, proxy 5xx) as opposed to NONE, which
+            -- means the API answered and had nothing for us.
+            v = line:match("^ERROR:(.+)$")
+            if v then helper_error = v end
         end
         state.parsed_series = parsed_series
         state.parsed_season = parsed_season
         state.parsed_episode = parsed_episode
+        state.matched_anime = matched_anime
+        state.matched_type = matched_type
+        if not epid and helper_error then
+            -- Transient failure, not a missing show: say so, and point at
+            -- the toggle as the retry gesture.
+            msg.warn("match request failed: " .. helper_error)
+            state.last_status = "error"
+            mp.osd_message(
+                "弹幕: 搜索失败（" .. helper_error .. "）— F10 关再开可重试", 4)
+            update_icon_overlay()
+            return
+        end
         if not epid then
             -- Append diagnostic info to a known log file so the user can
             -- paste it back when "no match" is unexpected. mpv's own log
@@ -629,7 +687,8 @@ function trigger_match()
             end
             state.last_status = "none"
             mp.osd_message(string.format(
-                "弹幕: 未匹配到 (Ctrl+F10 手动搜索 / 日志: %s)", DEBUG_LOG), 4)
+                "弹幕: 未匹配到 (F10 关再开重试 / Ctrl+F10 手动搜索 / 日志: %s)",
+                DEBUG_LOG), 4)
             update_icon_overlay()
             return
         end
@@ -654,7 +713,15 @@ function trigger_match()
             state.last_status = "ok"
             mp.set_property("secondary-sub-visibility",
                             settings.enabled and "yes" or "no")
-            mp.osd_message(string.format("弹幕: %d 条已加载", n), 2)
+            -- Naming the matched entry is what lets the user notice that a
+            -- same-named movie / wrong season got picked, while there's
+            -- still an obvious next step (Ctrl+F10).
+            if state.matched_anime then
+                mp.osd_message(string.format("弹幕: %s — %d 条已加载",
+                                             state.matched_anime, n), 2.5)
+            else
+                mp.osd_message(string.format("弹幕: %d 条已加载", n), 2)
+            end
             update_icon_overlay()
         end)
     end)
@@ -664,7 +731,8 @@ end
 -- Reload current match with the latest settings (called when user changes
 -- a setting in the panel — settings get persisted, helper re-runs).
 -- ============================================================================
-local function reload_current()
+-- Assigns to the local hoisted above set_visible (see there).
+function reload_current()
     -- If no match yet, "重新加载" means "try matching again". Useful when
     -- the first auto-match returned no result (transient API hiccup or a
     -- title-parse miss); user picks the row to retry without restarting mpv.
@@ -1208,6 +1276,11 @@ function open_search_input()
 end
 
 function run_search_query(query)
+    -- Remember what the icon was showing so we can put it back. Otherwise
+    -- a search the user cancels at the picker leaves last_status pinned at
+    -- "loading" forever, which also suppresses the toggle-to-retry path in
+    -- set_visible (it refuses to act while a search looks in-flight).
+    local prev_status = state.last_status
     state.last_status = "loading"; update_icon_overlay()
     helper_run_async({"search", query}, function(_s, r, _e)
         local results = {}
@@ -1221,6 +1294,8 @@ function run_search_query(query)
             update_icon_overlay()
             return
         end
+        state.last_status = prev_status
+        update_icon_overlay()
         show_results_panel(results)
     end)
 end
@@ -1358,11 +1433,17 @@ local show_episode_picker
 function show_results_panel(animes)
     local items = {}
     for _, a in ipairs(animes) do
+        -- Year and type are the two things that separate same-named
+        -- entries — the 1995 剧场版 from the 2002 TV动画, or one season
+        -- from the next. Lead with them.
+        local kind = a.typeDescription or a.type or ""
+        local year = a.year and (" · " .. a.year) or ""
         table.insert(items, {
-            label = string.format("%s  (%d 集, %s)",
+            label = string.format("%s  [%s%s]  %d 集",
                                   a.animeTitle,
-                                  #(a.episodes or {}),
-                                  a.type or a.typeDescription or ""),
+                                  kind,
+                                  year,
+                                  #(a.episodes or {})),
             anime = a,
         })
     end

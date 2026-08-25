@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -356,6 +357,16 @@ def _build_url(path_with_query: str) -> tuple[str, dict[str, str]]:
         f"or set cors_proxy in {CONFIG_FILE}.")
 
 
+# Transient-failure retry. The CORS proxy and dandanplay itself both drop
+# connections sporadically (TLS EOF, 502/503, read timeout), and a single
+# unlucky request used to surface as a flat "no match" that the user had to
+# resolve by hand. Retry a couple of times with a short backoff before
+# giving up; 4xx responses are the server telling us the request is wrong,
+# so those fail immediately.
+_HTTP_ATTEMPTS = 3
+_HTTP_BACKOFF = (0.7, 1.8)   # seconds to wait after attempt 1 and 2
+
+
 def _http_get_json(path_with_query: str, *, timeout: float = 15.0) -> Any:
     url, extra = _build_url(path_with_query)
     headers = {
@@ -363,23 +374,70 @@ def _http_get_json(path_with_query: str, *, timeout: float = 15.0) -> Any:
         "User-Agent": USER_AGENT,
         **extra,
     }
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    last_exc: Exception | None = None
+    for attempt in range(_HTTP_ATTEMPTS):
+        # Re-sign per attempt: the HMAC signature embeds a timestamp and
+        # the server rejects stale ones, so a retry must not reuse headers
+        # minted before the backoff sleep.
+        if attempt:
+            url, extra = _build_url(path_with_query)
+            headers.update(extra)
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise            # 4xx: our request is wrong, retrying won't help
+            last_exc = e
+        except (urllib.error.URLError, TimeoutError, ConnectionError,
+                json.JSONDecodeError) as e:
+            last_exc = e
+        if attempt < _HTTP_ATTEMPTS - 1:
+            wait = _HTTP_BACKOFF[attempt]
+            log(f"request failed ({last_exc}); retrying in {wait}s "
+                f"({attempt + 2}/{_HTTP_ATTEMPTS})")
+            time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 
-def ddp_search_episodes(anime: str, episode: str | int | None = None) -> list[dict]:
-    """Search by anime title (and optional episode number).
-    Returns list of {animeId, animeTitle, episodes: [...]}."""
+def ddp_search_episodes(anime: str) -> list[dict]:
+    """Search by anime title, returning every matching anime with its full
+    episode list: [{animeId, animeTitle, type, episodes: [...]}, …].
+
+    The endpoint also accepts an `episode=N` filter. Do NOT add it back.
+    It matches against dandanplay's own episode numbering, which runs
+    continuously across seasons — season 2 of 葬送的芙莉莲 is 第29话…第38话
+    — so filtering on episode 1 silently removes that whole season from
+    the results and the season can never be matched. Episode selection
+    belongs to _pick_episode, which handles both numbering conventions."""
     params = {"anime": anime, "withRelated": "true"}
-    if episode is not None and episode != "":
-        params["episode"] = str(episode)
     path_q = "/api/v2/search/episodes?" + urllib.parse.urlencode(params)
     data = _http_get_json(path_q)
     if not data.get("success", True) and "errorMessage" in data:
         log(f"search error: {data['errorMessage']}")
         return []
     return data.get("animes", [])
+
+
+def ddp_search_anime(keyword: str) -> list[dict]:
+    """Search the *anime* index (not episodes). Unlike /search/episodes this
+    endpoint returns `startDate` and `episodeCount`, which we need to tell
+    same-named works apart by release year (e.g. two "攻壳机动队" entries,
+    a 1995 movie and a 2002 TV series).
+
+    Returns list of {animeId, animeTitle, type, startDate, episodeCount, …}.
+    Errors are swallowed — year data is an optional scoring signal, never a
+    reason to fail an otherwise-good match."""
+    try:
+        path_q = "/api/v2/search/anime?" + urllib.parse.urlencode(
+            {"keyword": keyword})
+        data = _http_get_json(path_q)
+        return data.get("animes", []) or []
+    except Exception as e:
+        log(f"anime-index lookup failed ({e}); continuing without year data")
+        return []
 
 
 def ddp_get_comments(episode_id: int, ch_convert: int = 1) -> list[dict]:
@@ -406,14 +464,52 @@ _SE_PATS = [
 ]
 
 
-def parse_filename(name: str) -> tuple[str, int | None, int | None]:
-    """Best-effort parse: returns (title, season, episode).
+# A bracketed 4-digit year, e.g. "(2016)" / "[2025]". Media servers and
+# scrapers add these to movie filenames; dandanplay's search doesn't want
+# them in the query but the year is a strong disambiguator between
+# same-named works, so we capture it before stripping.
+_YEAR_IN_BRACKETS_RE = re.compile(r"[\(\[]\s*((?:19|20)\d{2})\s*[\)\]]")
+# A bare (unbracketed) year is only trusted when a quality/source tag
+# follows it, which is the "Movie.Name.2016.1080p.BluRay" convention.
+# Without that anchor a trailing 4-digit run is more likely part of the
+# title itself ("2046", "Blade Runner 2049") and is left alone.
+_YEAR_BEFORE_TAG_RE = re.compile(
+    r"(?<![\d])((?:19|20)\d{2})(?![\d])\s*[.\s_-]\s*"
+    r"(?=(?:1080p|2160p|720p|480p|4K|x26[45]|h\.?26[45]|hevc|AV1|"
+    r"BluRay|Blu-Ray|WEB[-.]?DL|WEBRip|BDRip|DVDRip|HDTV|REMUX|"
+    r"10bit|8bit|HDR|UHD)\b)",
+    re.IGNORECASE)
+
+
+def extract_year(text: str) -> int | None:
+    """Pull a release year out of a filename or media title, or None.
+    Bracketed years win; a bare year is only accepted when immediately
+    followed by a quality/source tag (see the regexes above)."""
+    if not text:
+        return None
+    m = _YEAR_IN_BRACKETS_RE.search(text)
+    if not m:
+        m = _YEAR_BEFORE_TAG_RE.search(text)
+    return int(m.group(1)) if m else None
+
+
+def parse_filename(name: str) -> tuple[str, int | None, int | None, int | None]:
+    """Best-effort parse: returns (title, season, episode, year).
     Title is the part of the filename stripped of season/episode/tags."""
     base = pathlib.Path(name).stem
+    year = extract_year(base)
     # Strip release-group / quality brackets first so leftover ']' chars
-    # don't end up in the title.
-    base = re.sub(r"\[[^\]]*\]", " ", base)          # any [tag]
-    base = re.sub(r"\([^\)]*\)", " ", base)          # any (tag)
+    # don't end up in the title. Bracket groups that are nothing but 1-3
+    # digits are KEPT: they're the episode marker in the very common
+    # "[Group] Title [01][1080p][CHS]" fansub layout, and stripping them
+    # here would hide the episode number from _SE_PATS below.
+    base = re.sub(r"\[\s*(?!\d{1,3}\s*\])[^\]]*\]", " ", base)   # any [tag]
+    base = re.sub(r"\(\s*(?!\d{1,3}\s*\))[^\)]*\)", " ", base)   # any (tag)
+    # A bare year immediately followed by a quality tag ("你的名字.2016.1080p")
+    # is a scraper's release year, not part of the title — drop it so the
+    # search query is the title alone. Bare years without that anchor stay
+    # put; see _YEAR_BEFORE_TAG_RE.
+    base = _YEAR_BEFORE_TAG_RE.sub(" ", base)
     # Strip common quality/codec tags
     base = re.sub(r"\b(?:1080p|2160p|720p|480p|x26[45]|h\.?26[45]|hevc|"
                   r"AV1|10bit|8bit|HDR|DV|REMUX|BluRay|Blu-Ray|WEB(?:-?DL|RIP)?|"
@@ -436,7 +532,7 @@ def parse_filename(name: str) -> tuple[str, int | None, int | None]:
     base = re.sub(r"[._]+", " ", base)
     base = re.sub(r"\s{2,}", " ", base)
     base = re.sub(r"\s*-\s*$", "", base.strip())
-    return base.strip(" -"), season, episode
+    return base.strip(" -"), season, episode, year
 
 
 # ============================================================================
@@ -479,72 +575,463 @@ def _normalize_search_query(query: str) -> str:
     return q or query.strip()
 
 
-def _search_with_season(title: str, season: int | None,
-                        episode: int | None) -> list[dict]:
-    """Run a single ddp search, appending the season number to non-S1 titles."""
-    query = title.strip()
+# ----------------------------------------------------------------------------
+# Season handling.
+#
+# Two directions, both needed:
+#
+#  (a) On the QUERY side — a title that already carries a season phrase
+#      ("葬送的芙莉莲 第二季", "Sousou no Frieren 2nd Season") must not get
+#      the season number appended a second time. "葬送的芙莉莲 第二季2"
+#      returns zero results from dandanplay. We split the phrase off so
+#      the bare series name can be searched on its own.
+#
+#  (b) On the CANDIDATE side — dandanplay stores each season as its own
+#      anime entry ("葬送的芙莉莲", "葬送的芙莉莲 第二季", "葬送的芙莉莲
+#      第三季 黄金乡篇"). Reading the season number out of each candidate
+#      title is what lets us pick the right one instead of blindly taking
+#      the first result, which is nearly always season 1.
+# ----------------------------------------------------------------------------
+_CJK_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6,
+          "VII": 7, "VIII": 8, "IX": 9, "X": 10,
+          "Ⅰ": 1, "Ⅱ": 2, "Ⅲ": 3, "Ⅳ": 4, "Ⅴ": 5, "Ⅵ": 6,
+          "Ⅶ": 7, "Ⅷ": 8, "Ⅸ": 9, "Ⅹ": 10}
+
+
+def _cjk_to_int(s: str) -> int | None:
+    """Parse a small Chinese numeral (1..99). Handles 一, 十, 十一, 二十,
+    二十三. Returns None on anything else."""
+    s = s.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if any(ch not in _CJK_DIGITS for ch in s):
+        return None
+    if "十" not in s:
+        # Plain digit sequence like 一 / 九; multi-char without 十 is not
+        # a form we recognise.
+        return _CJK_DIGITS[s] if len(s) == 1 else None
+    head, _, tail = s.partition("十")
+    tens = _CJK_DIGITS[head] if head else 1
+    ones = _CJK_DIGITS[tail] if tail else 0
+    return tens * 10 + ones
+
+
+# Season phrases anchored at the END of a title — used to split the query.
+_SEASON_SUFFIX_PATS = [
+    re.compile(r"\s*第\s*([0-9]+|[零〇一二三四五六七八九十]+)\s*[季期]\s*$"),
+    re.compile(r"\s*[Ss]eason\s*([0-9]+)\s*$"),
+    re.compile(r"\s*([0-9]+)\s*(?:st|nd|rd|th)\s*[Ss]eason\s*$"),
+    re.compile(r"\s+[Ss]([0-9]{1,2})\s*$"),
+]
+# The same phrases, unanchored — used to read a season out of a
+# dandanplay candidate title such as "葬送的芙莉莲 第三季 黄金乡篇".
+_SEASON_ANYWHERE_PATS = [
+    re.compile(r"第\s*([0-9]+|[零〇一二三四五六七八九十]+)\s*[季期]"),
+    re.compile(r"[Ss]eason\s*([0-9]+)"),
+    re.compile(r"([0-9]+)\s*(?:st|nd|rd|th)\s*[Ss]eason"),
+]
+# Roman numeral / bare digit sequel marker at the end of a title
+# ("刀剑神域Ⅱ", "OVERLORD IV", "约会大作战3"). Only 2..10 count — a
+# trailing 0 or 1 is part of the title itself ("命运石之门0", "K-ON!").
+_SEASON_TAIL_ROMAN_RE = re.compile(
+    r"[\s　]*(Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|Ⅹ|IX|IV|VIII|VII|VI|III|II|X|V)\s*$")
+_SEASON_TAIL_DIGIT_RE = re.compile(r"[\s　]*([2-9]|10)\s*$")
+# A season-ish phrase we can recognise but not assign a number to
+# ("最终季", "Final Season", "第二部", "黄金乡篇", "Part 2"). When a
+# candidate title carries one of these we treat its season as UNKNOWN
+# rather than assuming 1, so a genuine sequel isn't penalised for
+# failing to look like one.
+_SEASON_VAGUE_RE = re.compile(
+    r"最终[季期]|[Ff]inal\s*[Ss]eason|第\s*[^\s]{1,3}\s*部|[Pp]art\s*[0-9IVX]+|"
+    r"新编|续篇|续章|后篇|前篇|[^\s]{1,6}篇")
+
+
+def split_season_suffix(title: str) -> tuple[str, int | None]:
+    """Split a trailing season phrase off a title.
+        "葬送的芙莉莲 第二季"          → ("葬送的芙莉莲", 2)
+        "Sousou no Frieren 2nd Season" → ("Sousou no Frieren", 2)
+        "葬送的芙莉莲"                  → ("葬送的芙莉莲", None)
+    Returns (base_title, season_or_None). The base is never empty — if
+    stripping would consume the whole string, the input is returned."""
+    t = (title or "").strip()
+    for pat in _SEASON_SUFFIX_PATS:
+        m = pat.search(t)
+        if m:
+            n = _cjk_to_int(m.group(1))
+            base = t[:m.start()].strip(" 　-–—:：·")
+            if n and base:
+                return base, n
+    return t, None
+
+
+def title_season(title: str) -> int | None:
+    """The season number a dandanplay anime title implies.
+    Returns 1 when the title carries no sequel marker at all, and None
+    when it carries one we can't turn into a number (so the caller knows
+    to withhold judgement rather than assume season 1)."""
+    t = (title or "").strip()
+    for pat in _SEASON_ANYWHERE_PATS:
+        m = pat.search(t)
+        if m:
+            n = _cjk_to_int(m.group(1))
+            if n:
+                return n
+    m = _SEASON_TAIL_ROMAN_RE.search(t)
+    if m:
+        n = _ROMAN.get(m.group(1))
+        if n and n > 1:
+            return n
+    m = _SEASON_TAIL_DIGIT_RE.search(t)
+    if m:
+        return int(m.group(1))
+    if _SEASON_VAGUE_RE.search(t):
+        return None       # sequel-ish, but not numbered — unknown
+    return 1
+
+
+def _norm_for_cmp(s: str) -> str:
+    """Fold a title for fuzzy comparison: lowercase, drop whitespace and
+    punctuation so "Re:Zero - Starting Life" ≈ "rezerostartinglife"."""
+    s = (s or "").lower()
+    return re.sub(r"[\s　_\-–—:：·.,!?！？。、'\"“”‘’()\[\]/\\~*]+", "", s)
+
+
+# ----------------------------------------------------------------------------
+# Candidate scoring.
+#
+# dandanplay's /search/episodes returns every anime whose title contains the
+# keyword, ordered by its own relevance heuristic — which puts season 1 (and
+# often a same-named movie) ahead of the season we actually want. Blindly
+# taking animes[0] is the root cause of "season 2 never matches" and of a
+# movie stealing a same-named TV series' danmaku.
+#
+# So we score every candidate against what we know about the playing file and
+# take the winner. Signals, strongest first:
+#
+#   season  — the dominant signal for series. A candidate whose season number
+#             contradicts the file's is almost certainly wrong.
+#   kind    — tvseries vs movie (issue: 电影和电视剧同名).
+#   year    — separates same-named works; only consulted when the filename
+#             actually carried one.
+#   title   — fuzzy similarity, capped low because it's near-zero whenever the
+#             file is romaji and dandanplay's title is Chinese.
+#   episode — does the candidate even contain the requested episode number.
+# ----------------------------------------------------------------------------
+# A rung's best candidate at or above ACCEPT ends the search immediately.
+_SCORE_ACCEPT = 25.0
+# Below FLOOR we decline to guess and report "no match" — the user gets the
+# manual-search prompt instead of danmaku from the wrong show.
+_SCORE_FLOOR = -5.0
+
+
+# Set by resolve_match on success; read by _emit_match. See the assignment
+# site for why this isn't part of the return value.
+_last_match: dict[str, str] = {}
+
+
+@dataclass
+class MatchWant:
+    """What we know about the file we're trying to match."""
+    base: str                      # series title, season phrase removed
+    season: int | None = None
+    episode: int | None = None
+    year: int | None = None
+    kind: str | None = None        # "tv" | "movie" | None (unknown)
+
+
+def _episode_number(ep_title: str) -> int | None:
+    """The episode number a dandanplay episodeTitle starts with, or None
+    for specials ("S1 …") and openings/endings ("C1 Opening")."""
+    m = re.match(r"^第(\d+)[话集]|^E[Pp]?\.?\s*(\d+)\b|^(\d+)\b",
+                 str(ep_title or "").strip())
+    if not m:
+        return None
+    return int(next(g for g in m.groups() if g))
+
+
+def _is_special(ep_title: str) -> bool:
+    """Specials/OP/ED rows, which dandanplay appends after the real
+    episodes ("S1 迷你动画…", "C1 Opening")."""
+    return bool(re.match(r"^[SC]\d+\b", str(ep_title or "").strip()))
+
+
+def _score_candidate(cand: dict, want: MatchWant,
+                     meta: dict[int, dict]) -> tuple[float, list[str]]:
+    """Score one anime candidate against `want`. Returns (score, reasons)
+    where reasons is a human-readable breakdown for the log."""
+    score = 0.0
+    why: list[str] = []
+    ctitle = str(cand.get("animeTitle") or "")
+    cbase, _ = split_season_suffix(ctitle)
+    ctype = str(cand.get("type") or "").lower()
+    info = meta.get(int(cand.get("animeId") or 0), {})
+
+    # --- season -------------------------------------------------------
+    if want.season is not None:
+        cseason = title_season(ctitle)
+        if cseason is None:
+            why.append("season=? (unnumbered sequel)")
+        elif cseason == want.season:
+            score += 50.0
+            why.append(f"season={cseason} ✓ +50")
+        else:
+            score -= 40.0
+            why.append(f"season={cseason} ≠ {want.season} -40")
+
+    # --- kind (tvseries vs movie) -------------------------------------
+    if want.kind == "tv":
+        if ctype in ("tvseries", "web", "ova"):
+            score += 20.0
+            why.append(f"type={ctype} ✓ +20")
+        elif ctype == "movie":
+            score -= 40.0
+            why.append("type=movie but file looks like a TV episode -40")
+    elif want.kind == "movie":
+        if ctype == "movie":
+            score += 20.0
+            why.append("type=movie ✓ +20")
+        elif ctype in ("tvseries", "web"):
+            score -= 30.0
+            why.append(f"type={ctype} but file looks like a movie -30")
+
+    # --- release year --------------------------------------------------
+    if want.year is not None:
+        cyear = None
+        start = str(info.get("startDate") or "")
+        m = re.match(r"^(\d{4})", start)
+        if m:
+            cyear = int(m.group(1))
+        if cyear is None:
+            why.append("year=? ")
+        else:
+            diff = abs(cyear - want.year)
+            if diff == 0:
+                score += 30.0
+                why.append(f"year={cyear} ✓ +30")
+            elif diff == 1:
+                # Cours that straddle New Year, and cinema-vs-disc release
+                # dates, routinely differ by one.
+                score += 12.0
+                why.append(f"year={cyear} ~{want.year} +12")
+            else:
+                score -= 18.0
+                why.append(f"year={cyear} ≠ {want.year} -18")
+
+    # --- title similarity ---------------------------------------------
+    sim = difflib.SequenceMatcher(
+        None, _norm_for_cmp(cbase), _norm_for_cmp(want.base)).ratio()
+    score += sim * 30.0
+    why.append(f"title~{sim:.2f} +{sim * 30.0:.1f}")
+
+    # --- does it contain the episode we want --------------------------
+    if want.episode is not None:
+        eps = cand.get("episodes") or []
+        numbers = {n for n in (_episode_number(e.get("episodeTitle", ""))
+                               for e in eps if not _is_special(
+                                   e.get("episodeTitle", "")))
+                   if n is not None}
+        real = [e for e in eps if not _is_special(e.get("episodeTitle", ""))]
+        if want.episode in numbers or 1 <= want.episode <= len(real):
+            score += 10.0
+            why.append("has ep +10")
+        else:
+            score -= 20.0
+            why.append(f"ep {want.episode} out of range -20")
+
+    return score, why
+
+
+def _pick_episode(anime: dict, episode: int | None) -> dict | None:
+    """Choose the episode row inside a matched anime.
+
+    Order of attempts:
+      1. exact episode-number match on the title ("第29话 …"),
+      2. positional among the non-special rows, offset by the season's
+         first episode number — dandanplay numbers later seasons
+         continuously (season 2 of 葬送的芙莉莲 runs 第29话…第38话), so a
+         file labelled S02E01 and a file labelled E29 must both land on
+         the same row. This mirrors what the upstream web helper does.
+
+    If neither lands inside the episode list the entry simply doesn't have
+    the episode, and we return None — as upstream does. Falling back to the
+    first row instead would silently play episode 1's danmaku over, say,
+    E13 of a 12-episode season (a fansub numbering an OVA as 13), with
+    nothing on screen to say so."""
+    eps = anime.get("episodes") or []
+    if not eps:
+        return None
+    real = [e for e in eps if not _is_special(e.get("episodeTitle", ""))] or eps
+    if episode is None:
+        return real[0]                 # movie / single-episode entry
+    ep = int(episode)
+
+    for e in real:
+        if _episode_number(e.get("episodeTitle", "")) == ep:
+            return e
+
+    first_num = _episode_number(real[0].get("episodeTitle", ""))
+    if first_num and ep >= first_num:
+        idx = ep - first_num           # absolute numbering ("E29" → row 0)
+    else:
+        idx = ep - 1                   # per-season numbering ("E01" → row 0)
+    if 0 <= idx < len(real):
+        return real[idx]
+    log(f"  episode {ep} is not in this entry "
+        f"({len(real)} episodes, first is {real[0].get('episodeTitle')!r})")
+    return None
+
+
+def _search_query(title: str, season: int | None) -> str:
+    """Build one dandanplay query: append the season number to non-S1
+    titles, then normalise (strip bracketed year, join CJK↔digit spaces)."""
+    query = (title or "").strip()
     if season and season > 1:
         query = f"{query} {season}"
-    query = _normalize_search_query(query)
-    log(f"searching: anime={query!r} episode={episode}")
-    return ddp_search_episodes(query, episode)
+    return _normalize_search_query(query)
+
+
+def _query_ladder(title: str, want: MatchWant) -> list[str]:
+    """Queries to try, in order, for a given title.
+
+    The rungs exist because dandanplay tokenises on spaces and matches
+    substrings, so the *shape* of the query decides whether the right
+    season surfaces at all:
+
+      1. title + season digit — "葬送的芙莉莲" S2 → "葬送的芙莉莲2", which
+         dandanplay resolves straight to "葬送的芙莉莲 第二季". Skipped
+         when the title already spells the season out, because
+         "葬送的芙莉莲 第二季2" matches nothing.
+      2. the title verbatim — right when the title already carries the
+         season phrase in dandanplay's own wording.
+      3. the bare series name with any season phrase removed — returns
+         every season at once and lets scoring pick. This is the rung
+         that saves romaji titles: "Sousou no Frieren 2" finds seasons 1
+         and 3 but not 2, while plain "Sousou no Frieren" finds all three.
+    """
+    base, spelled = split_season_suffix(title)
+    rungs: list[str] = []
+
+    def add(q: str) -> None:
+        q = (q or "").strip()
+        if q and q not in rungs:
+            rungs.append(q)
+
+    if spelled is None:
+        add(_search_query(title, want.season))
+    add(_search_query(title, None))
+    add(_search_query(base, None))
+    return rungs
+
+
+def _best_candidate(animes: list[dict], want: MatchWant,
+                    need_year: bool) -> tuple[dict | None, float]:
+    """Score every candidate and return (best, score)."""
+    meta: dict[int, dict] = {}
+    if need_year and animes:
+        # Year lives on a different endpoint. Fetch it only when the
+        # filename actually gave us a year to compare against and there
+        # is a genuine choice to make.
+        for a in ddp_search_anime(want.base):
+            try:
+                meta[int(a.get("animeId"))] = a
+            except (TypeError, ValueError):
+                continue
+
+    best, best_score = None, float("-inf")
+    for cand in animes:
+        score, why = _score_candidate(cand, want, meta)
+        log(f"    candidate {cand.get('animeTitle')!r} "
+            f"[{cand.get('type')}] score={score:.1f}  ({'; '.join(why)})")
+        if score > best_score:
+            best, best_score = cand, score
+    return best, best_score
 
 
 def resolve_match(title: str, season: int | None, episode: int | None,
-                  cache_key: str | None = None) -> int | None:
+                  cache_key: str | None = None, year: int | None = None,
+                  kind: str | None = None) -> int | None:
     """Search dandanplay and pick the best episode match. Caches result.
 
-    Smart-match: if the primary search returns no animes AND we have a
-    series-level alias on file (recorded by the user via manual search),
-    retry the search using the aliased name. This lets future episodes
-    of the same series auto-match without manual intervention even when
-    the file's title doesn't match dandanplay's anime title."""
+    Runs a ladder of progressively-relaxed queries (see _query_ladder) and
+    scores every candidate each rung returns (see _score_candidate),
+    stopping as soon as a candidate clears _SCORE_ACCEPT. If no rung
+    produces a confident match we still take the best of everything seen,
+    provided it clears _SCORE_FLOOR — below that we report no match rather
+    than load danmaku from the wrong show.
+
+    Smart-match: a series-level alias recorded by the user via manual
+    search is appended as a final set of rungs, so future episodes of a
+    series whose filename never matches dandanplay's title still resolve
+    without manual intervention."""
     if cache_key:
         hit = cache_get(cache_key)
         if hit:
             log(f"cache hit: {cache_key} → {hit}")
             return hit
 
-    animes = _search_with_season(title, season, episode)
-    if not animes:
-        # Fallback: did the user previously map this series to a
-        # different dandanplay anime title via manual search?
-        alias = alias_get(title)
-        if alias and alias.strip() != title.strip():
-            log(f"no match for {title!r}; trying alias {alias!r}")
-            animes = _search_with_season(alias, season, episode)
+    base, spelled = split_season_suffix(title)
+    # A season spelled out in the title ("… 第二季", "… 2nd Season") wins
+    # over one taken from an SxxExx tag. Two reasons: fansub releases of a
+    # sequel routinely restart their own numbering at S01, and the
+    # episode-only filename patterns default season to 1 without any
+    # evidence, so a bare 1 from that path must not outrank the title.
+    want = MatchWant(base=base,
+                     season=spelled if spelled is not None else season,
+                     episode=episode, year=year, kind=kind)
+    log(f"want: base={want.base!r} season={want.season} "
+        f"episode={want.episode} year={want.year} kind={want.kind}")
+
+    rungs = _query_ladder(title, want)
+    alias = alias_get(title)
+    if alias and alias.strip() and alias.strip() != title.strip():
+        for q in _query_ladder(alias, want):
+            if q not in rungs:
+                rungs.append(q)
+        log(f"alias on file: {title!r} → {alias!r}")
+
+    overall_best, overall_score = None, float("-inf")
+    for q in rungs:
+        log(f"searching: anime={q!r}")
+        animes = ddp_search_episodes(q)
         if not animes:
-            log("no matches")
-            return None
+            log("  → 0 results")
+            continue
+        log(f"  → {len(animes)} candidate(s)")
+        cand, score = _best_candidate(animes, want, need_year=year is not None)
+        if cand is not None and score > overall_score:
+            overall_best, overall_score = cand, score
+        if score >= _SCORE_ACCEPT:
+            break
 
-    # Take the first anime, then within it pick the episode whose number
-    # matches our episode (look at episodeTitle prefix or position).
-    anime = animes[0]
-    log(f"  → anime: {anime.get('animeTitle')} ({len(anime.get('episodes',[]))} eps)")
-
-    eps = anime.get("episodes", [])
-    if not eps:
+    if overall_best is None:
+        log("no matches")
+        return None
+    if overall_score < _SCORE_FLOOR:
+        log(f"best candidate {overall_best.get('animeTitle')!r} scored "
+            f"{overall_score:.1f} < floor {_SCORE_FLOOR} — declining to guess")
         return None
 
-    chosen = None
-    if episode is not None:
-        # Exact-number match in title (covers most series)
-        for e in eps:
-            t = str(e.get("episodeTitle", ""))
-            m = re.match(r"^第(\d+)[话集]|^E[Pp]?\.?\s*(\d+)\b|^(\d+)\b", t)
-            if m:
-                num = int(next(g for g in m.groups() if g))
-                if num == int(episode):
-                    chosen = e
-                    break
-        # Fall back to positional (1-based)
-        if chosen is None and 1 <= int(episode) <= len(eps):
-            chosen = eps[int(episode) - 1]
+    log(f"  → anime: {overall_best.get('animeTitle')} "
+        f"[{overall_best.get('type')}] score={overall_score:.1f} "
+        f"({len(overall_best.get('episodes', []))} eps)")
+
+    chosen = _pick_episode(overall_best, episode)
     if chosen is None:
-        chosen = eps[0]   # movie or single-episode
+        return None
 
     log(f"  → episode: {chosen.get('episodeTitle')} (id={chosen.get('episodeId')})")
     eid = int(chosen["episodeId"])
+    # Surface what we landed on so the mpv side can show it on the OSD —
+    # the only way the user can tell a same-named movie from the TV series
+    # without opening the log. Kept out of the return type (and out of the
+    # match cache) so the cache file format stays backwards compatible.
+    _last_match["anime"] = str(overall_best.get("animeTitle") or "")
+    _last_match["episode"] = str(chosen.get("episodeTitle") or "")
+    _last_match["type"] = str(overall_best.get("type") or "")
     if cache_key:
         cache_put(cache_key, eid)
     return eid
@@ -1070,25 +1557,53 @@ def _emit_match(eid: int | None, series: str,
         print(f"SEASON:{season}")
     if episode is not None:
         print(f"EPISODE:{episode}")
+    if eid and _last_match.get("anime"):
+        print(f"ANIME:{_last_match['anime']}")
+        if _last_match.get("type"):
+            print(f"TYPE:{_last_match['type']}")
+
+
+def _infer_kind(season: int | None, episode: int | None) -> str | None:
+    """Guess whether the file is a TV episode or a movie, so a same-named
+    movie and TV series can be told apart (dandanplay lists both, e.g.
+    the 1995 "攻壳机动队" film alongside the 2002 TV series).
+
+    An episode number means a series; the complete absence of season and
+    episode markers means a standalone film. Anything else stays unknown
+    so scoring simply ignores the signal."""
+    if episode is not None:
+        return "tv"
+    if season is None:
+        return "movie"
+    return None
 
 
 def cmd_match_jellyfin(args) -> int:
     series = (args.title or "").strip()
+    # Jellyfin hands us the title verbatim, so any "(2016)" the server
+    # appended is still in there. Capture it before the query normaliser
+    # strips it.
+    year = extract_year(series)
+    kind = _infer_kind(args.season, args.episode)
     cache_key = f"jf::{series}::{args.season}::{args.episode}"
-    eid = resolve_match(series, args.season, args.episode, cache_key)
+    eid = resolve_match(series, args.season, args.episode, cache_key,
+                        year=year, kind=kind)
     _emit_match(eid, series, args.season, args.episode)
     return 0 if eid else 1
 
 
 def cmd_match_file(args) -> int:
-    title, season, episode = parse_filename(args.path)
+    title, season, episode, year = parse_filename(args.path)
     if not title:
         log("could not parse filename")
         _emit_match(None, "", None, None)
         return 1
-    log(f"parsed: title={title!r} season={season} episode={episode}")
+    kind = _infer_kind(season, episode)
+    log(f"parsed: title={title!r} season={season} episode={episode} "
+        f"year={year} kind={kind}")
     cache_key = f"file::{os.path.basename(args.path)}"
-    eid = resolve_match(title, season, episode, cache_key)
+    eid = resolve_match(title, season, episode, cache_key,
+                        year=year, kind=kind)
     _emit_match(eid, title, season, episode)
     return 0 if eid else 1
 
@@ -1128,12 +1643,34 @@ def cmd_search(args) -> int:
     # Normalise the query (strip bracketed year, join CJK↔digit spaces)
     # the same way the auto-match path does — e.g. when the search panel
     # pre-fills the auto-parsed title "罗小黑战记 2 (2025)".
-    animes = ddp_search_episodes(_normalize_search_query(args.query))
+    query = _normalize_search_query(args.query)
+    animes = ddp_search_episodes(query)
+    if not animes:
+        # Same relaxation the auto-match ladder uses: a query carrying a
+        # season phrase ("葬送的芙莉莲 第二季") may return nothing while the
+        # bare series name returns every season.
+        base, _ = split_season_suffix(query)
+        if base and base != query:
+            log(f"no results for {query!r}; retrying with {base!r}")
+            animes = ddp_search_episodes(base)
+    # Join against the anime index for release year and episode count —
+    # /search/episodes doesn't carry them, and the year is what tells two
+    # same-named works apart in the picker.
+    meta: dict[int, dict] = {}
+    for a in ddp_search_anime(query):
+        try:
+            meta[int(a.get("animeId"))] = a
+        except (TypeError, ValueError):
+            continue
     for a in animes:
+        info = meta.get(int(a.get("animeId") or 0), {})
+        year = str(info.get("startDate") or "")[:4] or None
         # Trim to essentials so the Lua menu doesn't get massive
         slim = {
             "animeTitle": a.get("animeTitle"),
             "type": a.get("type"),
+            "typeDescription": a.get("typeDescription"),
+            "year": year,
             "episodes": [
                 {"episodeId": e["episodeId"], "episodeTitle": e["episodeTitle"]}
                 for e in a.get("episodes", [])
