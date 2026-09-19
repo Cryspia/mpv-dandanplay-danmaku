@@ -1556,14 +1556,60 @@ mp.add_key_binding("Alt+F10", "danmaku-opacity-quick", function()
     reload_current()
 end)
 
--- Mouse handling: chain alongside any existing MOUSE_BTN0 binding (shim
--- registers one). add_key_binding's name avoids collision.
-mp.add_key_binding("MBTN_LEFT", "danmaku-click", function()
-    if mouse_inside_icon() then
+-- Mouse handling. mpv hands a key to ONE binding, and it picks by
+-- strength first, then by how recently the section was enabled:
+-- forced beats weak, and between two forced bindings the later one
+-- wins. `add_key_binding` makes a weak binding, so ours lost outright
+-- to any in-window UI that binds MBTN_LEFT forced -- jellyfin-mpv-shim
+-- 3's mpvtk renderer does. Binding forced at load time is not enough
+-- either: that UI re-enables its own section whenever it appears, which
+-- is after we loaded, and its priority climbs above ours again.
+--
+-- There is no registration order that wins that race for good, so do
+-- not try. Claim MBTN_LEFT only while the pointer is actually over the
+-- icon, and drop the claim the moment it leaves. Re-registering makes
+-- our section the most recently enabled one, so the click lands here;
+-- everywhere else we are simply not bound and the other UI keeps its
+-- mouse untouched. Nothing has to be forwarded, and nothing is
+-- swallowed.
+local _click_claimed = false
+
+local function claim_click()
+    -- Re-register even when already claimed: the other UI may have
+    -- enabled its section since, and re-adding puts us back on top.
+    -- Cheap enough for a pointer that is inside a 70x50 box.
+    mp.add_forced_key_binding("MBTN_LEFT", "danmaku-click", function()
+        if not mouse_inside_icon() then return end
         set_visible(not settings.enabled)
         mp.osd_message("弹幕: " .. (settings.enabled and "开" or "关"), 1.5)
-    end
+    end)
+    _click_claimed = true
+end
+
+local function release_click()
+    if not _click_claimed then return end
+    mp.remove_key_binding("danmaku-click")
+    _click_claimed = false
+end
+
+-- A pointer parked on the icon sends no move events, so the hover
+-- claim would go stale if the other UI enabled its section in the
+-- meantime (its HUD appears on its own timer). Re-assert on a slow
+-- timer while inside; stopped as soon as the pointer leaves.
+local _claim_timer = mp.add_periodic_timer(0.5, function()
+    if mouse_inside_icon() then claim_click() end
 end)
+_claim_timer:kill()
+
+local function update_click_claim()
+    if mouse_inside_icon() then
+        claim_click()
+        _claim_timer:resume()
+    else
+        release_click()
+        _claim_timer:kill()
+    end
+end
 
 -- Track mouse activity for the OSC-visibility heuristic.
 --
@@ -1585,6 +1631,7 @@ mp.observe_property("mouse-pos", "native", function(_, pos)
     _last_pos = pos
     state.cursor_last = mp.get_time()
     update_icon_overlay()
+    update_click_claim()
 end)
 
 -- Periodic refresh so the icon hides after the cursor stops moving
