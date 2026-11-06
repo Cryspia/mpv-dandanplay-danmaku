@@ -1,6 +1,8 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -78,6 +80,23 @@ class QueryLadderTests(unittest.TestCase):
             )
 
         self.assertEqual(episode_id, 17431001)
+
+
+class MatchCacheTests(unittest.TestCase):
+    def test_legacy_unversioned_match_is_ignored(self):
+        key = "jf::为美好的世界献上祝福！::3::1"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            (cache_dir / "matches.json").write_text(
+                json.dumps({key: 174310003}), encoding="utf-8"
+            )
+            with mock.patch.object(dm, "CACHE_DIR", cache_dir):
+                self.assertIsNone(dm.cache_get(key))
+                dm.cache_put(key, 174310001)
+
+            data = json.loads((cache_dir / "matches.json").read_text("utf-8"))
+            self.assertEqual(data[key], 174310003)
+            self.assertEqual(data[f"{dm._MATCH_CACHE_VERSION}::{key}"], 174310001)
 
 
 if __name__ == "__main__":

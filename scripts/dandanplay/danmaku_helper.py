@@ -209,6 +209,16 @@ def load_settings() -> dict:
 # ============================================================================
 # Match cache: keyed on (title, season, episode) or filepath
 # ============================================================================
+_MATCH_CACHE_VERSION = "v2"
+
+
+def _match_cache_key(key: str) -> str:
+    # v1 could cache a season-number search fragment by positional index
+    # (for example S03E01 -> the API-filtered episode 3). Keep the old data in
+    # place for diagnostics, but never trust it after the matching fix.
+    return f"{_MATCH_CACHE_VERSION}::{key}"
+
+
 def _cache_path() -> pathlib.Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR / "matches.json"
@@ -220,7 +230,7 @@ def cache_get(key: str) -> int | None:
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        v = data.get(key)
+        v = data.get(_match_cache_key(key))
         return int(v) if v else None
     except Exception:
         return None
@@ -234,7 +244,7 @@ def cache_put(key: str, episode_id: int) -> None:
             data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    data[key] = int(episode_id)
+    data[_match_cache_key(key)] = int(episode_id)
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                  encoding="utf-8")
 
