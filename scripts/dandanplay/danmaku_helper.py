@@ -759,6 +759,42 @@ def _is_special(ep_title: str) -> bool:
     return bool(re.match(r"^[SC]\d+\b", str(ep_title or "").strip()))
 
 
+def _episode_index(anime: dict, episode: int | None) -> int | None:
+    """Return the matching non-special row index, or ``None``.
+
+    dandanplay treats a trailing number in the ``anime`` search term as an
+    episode hint. A season-discovery query such as ``Title 3`` can therefore
+    return the right third-season anime with only its episode 3 row. That
+    fragment must not be treated as a complete season: doing so maps S03E01
+    to episode 3 by position and makes every episode after E03 fail.
+
+    Exact episode titles are always safe. Relative per-season indexing is
+    allowed only for a multi-row, contiguous sequence, which is the shape of
+    a complete later-season response (for example episodes 29..38)."""
+    eps = anime.get("episodes") or []
+    if not eps:
+        return None
+    real = [e for e in eps if not _is_special(e.get("episodeTitle", ""))] or eps
+    if episode is None:
+        return 0
+
+    ep = int(episode)
+    numbers = [_episode_number(e.get("episodeTitle", "")) for e in real]
+    for idx, number in enumerate(numbers):
+        if number == ep:
+            return idx
+
+    # A one-row or non-contiguous response may be filtered search output,
+    # not a complete season. Positional fallback would silently mis-match it.
+    if (len(real) < 2 or any(n is None for n in numbers)
+            or any(b != a + 1 for a, b in zip(numbers, numbers[1:]))):
+        return None
+
+    first_num = numbers[0]
+    idx = ep - first_num if first_num and ep >= first_num else ep - 1
+    return idx if 0 <= idx < len(real) else None
+
+
 def _score_candidate(cand: dict, want: MatchWant,
                      meta: dict[int, dict]) -> tuple[float, list[str]]:
     """Score one anime candidate against `want`. Returns (score, reasons)
@@ -829,13 +865,7 @@ def _score_candidate(cand: dict, want: MatchWant,
 
     # --- does it contain the episode we want --------------------------
     if want.episode is not None:
-        eps = cand.get("episodes") or []
-        numbers = {n for n in (_episode_number(e.get("episodeTitle", ""))
-                               for e in eps if not _is_special(
-                                   e.get("episodeTitle", "")))
-                   if n is not None}
-        real = [e for e in eps if not _is_special(e.get("episodeTitle", ""))]
-        if want.episode in numbers or 1 <= want.episode <= len(real):
+        if _episode_index(cand, want.episode) is not None:
             score += 10.0
             why.append("has ep +10")
         else:
@@ -869,16 +899,8 @@ def _pick_episode(anime: dict, episode: int | None) -> dict | None:
         return real[0]                 # movie / single-episode entry
     ep = int(episode)
 
-    for e in real:
-        if _episode_number(e.get("episodeTitle", "")) == ep:
-            return e
-
-    first_num = _episode_number(real[0].get("episodeTitle", ""))
-    if first_num and ep >= first_num:
-        idx = ep - first_num           # absolute numbering ("E29" → row 0)
-    else:
-        idx = ep - 1                   # per-season numbering ("E01" → row 0)
-    if 0 <= idx < len(real):
+    idx = _episode_index(anime, ep)
+    if idx is not None:
         return real[idx]
     log(f"  episode {ep} is not in this entry "
         f"({len(real)} episodes, first is {real[0].get('episodeTitle')!r})")
@@ -946,7 +968,12 @@ def _best_candidate(animes: list[dict], want: MatchWant,
         score, why = _score_candidate(cand, want, meta)
         log(f"    candidate {cand.get('animeTitle')!r} "
             f"[{cand.get('type')}] score={score:.1f}  ({'; '.join(why)})")
-        if score > best_score:
+        # A season-number query can return the correct anime with only the
+        # episode named by that number. Keep it in diagnostics, but do not let
+        # an incomplete result stop the query ladder or enter the match cache.
+        eligible = (want.episode is None
+                    or _episode_index(cand, want.episode) is not None)
+        if eligible and score > best_score:
             best, best_score = cand, score
     return best, best_score
 
